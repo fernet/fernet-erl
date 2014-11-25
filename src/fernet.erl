@@ -31,12 +31,14 @@ generate_token(Message, Key) ->
 generate_token(Message, IV, Seconds, Key) ->
   Encoded_Seconds = seconds_to_binary(Seconds),
   Padded = pkcs7:pad(list_to_binary(Message)),
-  Cyphertext = crypto:block_encrypt(aes_cbc128, Key, IV, Padded),
-  erlang:display(binary_to_list(Cyphertext)),
+  Cyphertext = block_encrypt(extract_encryption_key(Key), IV, Padded),
   Hmac = generate_hmac(Seconds, IV, Cyphertext, extract_signing_key(Key)),
-  encode_token(<< <<?VERSION>>/binary, Encoded_Seconds/binary, IV/binary, Cyphertext/binary, Hmac/binary >>).
+  << <<?VERSION>>/binary, Encoded_Seconds/binary, IV/binary, Cyphertext/binary, Hmac/binary >>.
 
 %% Internals
+
+block_encrypt(Key, IV, Padded) ->
+  crypto:block_encrypt(aes_cbc128, Key, IV, Padded).
 
 timestamp_to_seconds({MegaSecs, Secs, MicroSecs}) ->
   round(((MegaSecs*1000000 + Secs)*1000000 + MicroSecs) / 1000000).
@@ -45,13 +47,22 @@ timestamp_to_seconds({MegaSecs, Secs, MicroSecs}) ->
 generate_iv() ->
   crypto:strong_rand_bytes(16).
 
+%% Returns the signing key from a 256byte Fernet Key
 -spec extract_signing_key(binary()) -> binary().
 extract_signing_key(Key) ->
   binary_part(Key, {0, 16}).
 
+%% Returns the encryption key from a 256byte Fernet Key
+-spec extract_encryption_key(binary()) -> binary().
+extract_encryption_key(Key) ->
+  binary_part(Key, {16, 16}).
+
 generate_hmac(Seconds, IV, Cyphertext, Key) ->
   Encoded_Seconds = seconds_to_binary(Seconds),
-  crypto:hmac(sha256, Key, << <<?VERSION>>/binary, Encoded_Seconds/binary, IV/binary, Cyphertext/binary >>).
+  generate_hmac(Key, << <<?VERSION>>/binary, Encoded_Seconds/binary, IV/binary, Cyphertext/binary >>).
+
+generate_hmac(Key, Bytes) ->
+  base16(crypto:hmac(sha256, Key, Bytes)).
 
 -spec seconds_to_binary(integer()) -> binary().
 seconds_to_binary(Seconds) ->
@@ -63,6 +74,15 @@ pad_to_8(Binary) ->
      of 0 -> Binary
       ; N -> <<0:(N*8), Binary/binary>>
    end.
+
+-spec base16(binary()) -> <<_:_*16>>.
+base16(Data) ->
+   << <<(hex(N div 16)), (hex(N rem 16))>> || <<N>> <= Data >>.
+
+hex(N) when N < 10 ->
+  N + $0;
+hex(N) when N < 16 ->
+  N - 10 + $a.
 
 %% Tests
 -ifdef(TEST).
@@ -101,12 +121,37 @@ generate_token_test() ->
   Tok = generate_token("hello", <<0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15>>, 499162800, decode_key("cw_0x689RpI-jtRR7oE8h_eQsKImvJapLeSbXpwF4e4=")),
   ?assertEqual("gAAAAAAdwJ6wAAECAwQFBgcICQoLDA0ODy021cpGVWKZ_eEwCGM4BLLF_5CV9dOPmrhuVUPgJobwOz7JcbmrR64jVmpU4IwqDA==", encode_token(Tok)).
 
+
+generate_hmac_test() ->
+  Hmac = generate_hmac(<<38, 183, 72, 8, 49, 250, 199, 115, 59, 118, 228, 30, 51, 199, 73, 16>>,
+                       <<128, 0, 0, 0, 0, 84, 116, 204, 93, 212, 213, 44, 147,
+                         52, 18, 109, 205, 200, 207, 169, 169, 218, 26, 197,
+                         194, 0, 15, 209, 69, 43, 22, 9, 144, 199, 196, 190,
+                         87, 188, 201, 189, 206, 179, 93, 252, 89, 228, 158,
+                          172, 11, 57, 29, 13, 248, 192, 75, 124, 241>>),
+  ?assertEqual(<< "07501fedf10da64f9f1e2c6012d2a780495ff031f88cf21471711a93423f57b0" >>, Hmac).
+
 seconds_to_binary_test() ->
   ?assertEqual(<<0, 0, 0, 0, 29, 192, 158, 176>>, seconds_to_binary(499162800)).
 
 pad_to_8_test() ->
   ?assertEqual(<<0, 0, 0, 0, 1, 2, 3, 4>>, pad_to_8(<<1, 2, 3, 4>>)),
   ?assertEqual(<<1, 2, 3, 4, 1, 2, 3, 4>>, pad_to_8(<<1, 2, 3, 4, 1, 2, 3, 4>>)).
+
+block_encrypt_test() ->
+  Key = <<247, 144, 176, 162, 38, 188, 150, 169, 45, 228, 155, 94, 156, 5, 225, 238>>,
+  Message = <<104, 101, 108, 108, 111, 11, 11, 11, 11, 11, 11, 11, 11, 11, 11, 11>>,
+  ?assertEqual(<<45, 54, 213, 202, 70, 85, 98, 153, 253, 225, 48, 8, 99, 56, 4, 178>>, block_encrypt(Key, <<0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15>>, Message)).
+
+extract_encryption_key_test() ->
+  Key = "cw_0x689RpI-jtRR7oE8h_eQsKImvJapLeSbXpwF4e4=",
+  DecodedKey = decode_key(Key),
+  ExpectedBytes = <<247, 144, 176, 162, 38, 188, 150, 169, 45, 228, 155, 94, 156, 5, 225, 238>>,
+  ?assertEqual(ExpectedBytes, extract_encryption_key(DecodedKey)).
+
+pad_string_test() ->
+  ExpectedBytes = <<104, 101, 108, 108, 111, 11, 11, 11, 11, 11, 11, 11, 11, 11, 11, 11, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0>>,
+  ?assertEqual(ExpectedBytes, pkcs7:pad(list_to_binary("hello"))).
 
 % requires gen_hmac_test
 
