@@ -1,0 +1,14 @@
+{application, fernet,
+ [
+  {description, "An Erlang fernet library"},
+  {vsn, "1"},
+  {modules, [
+             fernet
+            ]},
+  {registered, []},
+  {applications, [
+                  kernel,
+                  stdlib
+                 ]},
+  {env, []}
+ ]}.
