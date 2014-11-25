@@ -40,6 +40,9 @@ generate_token(Message, IV, Seconds, Key) ->
 block_encrypt(Key, IV, Padded) ->
   crypto:block_encrypt(aes_cbc128, Key, IV, Padded).
 
+% Take an Erlang now() return and calculate the total number of seconds since
+% the Epoch.
+-spec timestamp_to_seconds({integer(), integer(), integer()}) -> integer().
 timestamp_to_seconds({MegaSecs, Secs, MicroSecs}) ->
   round(((MegaSecs*1000000 + Secs)*1000000 + MicroSecs) / 1000000).
 
