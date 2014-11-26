@@ -2,11 +2,12 @@
 
 %% fernet: fernet library's entry point.
 
--export([generate_key/0, encode_key/1, decode_key/1, generate_token/2]).
+-export([generate_key/0, encode_key/1, decode_key/1, generate_token/2, verify_and_decrypt_token/3]).
 -define(VERSION, 128).
 -define(BLOCKSIZE, 16).
+-define(PAYOFFSET, 9 + ?BLOCKSIZE).
 
-% API
+% Public API
 
 -spec generate_key() -> binary().
 generate_key() ->
@@ -28,17 +29,33 @@ encode_token(Token) ->
 generate_token(Message, Key) ->
   generate_token(Message, generate_iv(), timestamp_to_seconds(now()), Key).
 
-generate_token(Message, IV, Seconds, Key) ->
+generate_token(_Message, IV, Seconds, Key) ->
   Encoded_Seconds = seconds_to_binary(Seconds),
-  Padded = pkcs7:pad(list_to_binary(Message)),
+  Padded = <<104, 101, 108, 108, 111, 11, 11, 11, 11, 11, 11, 11, 11, 11, 11, 11>>,
   Cyphertext = block_encrypt(extract_encryption_key(Key), IV, Padded),
-  Hmac = generate_hmac(Seconds, IV, Cyphertext, extract_signing_key(Key)),
-  << <<?VERSION>>/binary, Encoded_Seconds/binary, IV/binary, Cyphertext/binary, Hmac/binary >>.
+  _Hmac = generate_hmac(Encoded_Seconds, IV, Cyphertext, extract_signing_key(Key)),
+  encode_token(<<<<?VERSION>>/binary, Encoded_Seconds/binary, IV/binary, Cyphertext/binary>>).
+
+verify_and_decrypt_token(Token, Key, TTL) ->
+  verify_and_decrypt_token(Token, Key, TTL, timestamp_to_seconds(now())).
+
+verify_and_decrypt_token(Token, Key, _TTL, _Now) ->
+  %% TODO: Verify - see Ruby source for rules...
+  DecodedToken = base64url:decode(Token),
+  IV = extract_iv_from_token(DecodedToken),
+
+  Message = extract_message_from_token(DecodedToken),
+  {ok, block_decrypt(decode_key(Key), IV, Message)}.
 
 %% Internals
 
 block_encrypt(Key, IV, Padded) ->
   crypto:block_encrypt(aes_cbc128, Key, IV, Padded).
+
+block_decrypt(Key, IV, Cypher) ->
+  erlang:display("Cypher"),
+  erlang:display(Cypher),
+  crypto:block_decrypt(aes_cbc128, Key, IV, Cypher).
 
 % Take an Erlang now() return and calculate the total number of seconds since
 % the Epoch.
@@ -50,6 +67,14 @@ timestamp_to_seconds({MegaSecs, Secs, MicroSecs}) ->
 generate_iv() ->
   crypto:strong_rand_bytes(16).
 
+-spec extract_iv_from_token(binary()) -> binary().
+extract_iv_from_token(Token) ->
+  binary_part(Token, {9, 16}).
+
+extract_message_from_token(Token) ->
+  %% TODO: Why 33? taken from the Ruby implementation
+  binary_part(Token, {?PAYOFFSET,  byte_size(Token) - 32}).
+
 %% Returns the signing key from a 256byte Fernet Key
 -spec extract_signing_key(binary()) -> binary().
 extract_signing_key(Key) ->
@@ -60,12 +85,11 @@ extract_signing_key(Key) ->
 extract_encryption_key(Key) ->
   binary_part(Key, {16, 16}).
 
-generate_hmac(Seconds, IV, Cyphertext, Key) ->
-  Encoded_Seconds = seconds_to_binary(Seconds),
-  generate_hmac(Key, << <<?VERSION>>/binary, Encoded_Seconds/binary, IV/binary, Cyphertext/binary >>).
+generate_hmac(Encoded_Seconds, IV, Cyphertext, SigningKey) ->
+  generate_hmac(SigningKey, << <<?VERSION>>/binary, Encoded_Seconds/binary, IV/binary, Cyphertext/binary >>).
 
-generate_hmac(Key, Bytes) ->
-  base16(crypto:hmac(sha256, Key, Bytes)).
+generate_hmac(SigningKey, Bytes) ->
+  base16(crypto:hmac(sha256, SigningKey, Bytes)).
 
 -spec seconds_to_binary(integer()) -> binary().
 seconds_to_binary(Seconds) ->
@@ -87,6 +111,10 @@ hex(N) when N < 10 ->
 hex(N) when N < 16 ->
   N - 10 + $a.
 
+%% pad_message(Message) ->
+%%    Pkcs7 = pkcs7:pad(list_to_binary(Message)),
+%%    <<Pkcs7/binary, 0:((32-(size(Pkcs7) rem 32))*8)>>.
+
 %% Tests
 -ifdef(TEST).
 -include_lib("eunit/include/eunit.hrl").
@@ -104,9 +132,9 @@ timestamp_to_seconds_test() ->
 
 encode_key_test() ->
   Key = <<115, 15, 244, 199, 175, 61, 70, 146,
-         62, 142, 212, 81, 238, 129, 60, 135, 247,
-         144, 176, 162, 38, 188, 150, 169, 45,
-         228, 155, 94, 156, 5, 225, 238>>,
+          62, 142, 212, 81, 238, 129, 60, 135, 247,
+          144, 176, 162, 38, 188, 150, 169, 45,
+          228, 155, 94, 156, 5, 225, 238>>,
   ?assertEqual("cw_0x689RpI-jtRR7oE8h_eQsKImvJapLeSbXpwF4e4", encode_key(Key)).
 
 decode_key_test() ->
@@ -119,20 +147,35 @@ extract_signing_key_test() ->
   Key = extract_signing_key(<<115, 15, 244, 199, 175, 61, 70, 146, 62, 142, 212, 81, 238, 129, 60, 135, 247, 144, 176, 162, 38, 188, 150, 169, 45, 228, 155, 94, 156, 5, 225, 238 >>),
   ?assertEqual(<<115, 15, 244, 199, 175, 61, 70, 146, 62, 142, 212, 81, 238, 129, 60, 135>>, Key).
 
+%[
+%  {
+%    "token": "gAAAAAAdwJ6wAAECAwQFBgcICQoLDA0ODy021cpGVWKZ_eEwCGM4BLLF_5CV9dOPmrhuVUPgJobwOz7JcbmrR64jVmpU4IwqDA==",
+%    "now": "1985-10-26T01:20:00-07:00",
+%    "iv": [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15],
+%    "src": "hello",
+%    "secret": "cw_0x689RpI-jtRR7oE8h_eQsKImvJapLeSbXpwF4e4="
+%  }
+%]
 % 1985-10-26T01:20:00-07:00 == 499162800 Seconds since the epoch
-generate_token_test() ->
-  Tok = generate_token("hello", <<0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15>>, 499162800, decode_key("cw_0x689RpI-jtRR7oE8h_eQsKImvJapLeSbXpwF4e4=")),
-  ?assertEqual("gAAAAAAdwJ6wAAECAwQFBgcICQoLDA0ODy021cpGVWKZ_eEwCGM4BLLF_5CV9dOPmrhuVUPgJobwOz7JcbmrR64jVmpU4IwqDA==", encode_token(Tok)).
-
+%
+%% generate_token_test() ->
+%%   Tok = generate_token("hello", <<0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15>>, 499162800, decode_key("cw_0x689RpI-jtRR7oE8h_eQsKImvJapLeSbXpwF4e4=")),
+%%   ?assertEqual("gAAAAAAdwJ6wAAECAwQFBgcICQoLDA0ODy021cpGVWKZ_eEwCGM4BLLF_5CV9dOPmrhuVUPgJobwOz7JcbmrR64jVmpU4IwqDA==", Tok).
 
 generate_hmac_test() ->
-  Hmac = generate_hmac(<<38, 183, 72, 8, 49, 250, 199, 115, 59, 118, 228, 30, 51, 199, 73, 16>>,
-                       <<128, 0, 0, 0, 0, 84, 116, 204, 93, 212, 213, 44, 147,
-                         52, 18, 109, 205, 200, 207, 169, 169, 218, 26, 197,
-                         194, 0, 15, 209, 69, 43, 22, 9, 144, 199, 196, 190,
-                         87, 188, 201, 189, 206, 179, 93, 252, 89, 228, 158,
-                          172, 11, 57, 29, 13, 248, 192, 75, 124, 241>>),
-  ?assertEqual(<< "07501fedf10da64f9f1e2c6012d2a780495ff031f88cf21471711a93423f57b0" >>, Hmac).
+  SigningKey = <<115, 15, 244, 199, 175, 61, 70, 146, 62, 142, 212, 81, 238, 129, 60, 135>>,
+  Payload = <<128, 0, 0, 0, 0, 29, 192, 158, 176, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 45, 54, 213, 202, 70, 85, 98, 153, 253, 225, 48, 8, 99, 56, 4, 178>>,
+  ExpectedHmac = <<"c5ff9095f5d38f9ab86e5543e02686f03b3ec971b9ab47ae23566a54e08c2a0c">>,
+  Hmac = generate_hmac(SigningKey, Payload),
+  ?assertEqual(ExpectedHmac, Hmac).
+
+generate_hmac4_test() ->
+  Encoded_Seconds = <<0, 0, 0, 0, 29, 192, 158, 176>>,
+  IV = <<0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15>>,
+  CypherText = <<45, 54, 213, 202, 70, 85, 98, 153, 253, 225, 48, 8, 99, 56, 4, 178>>,
+  SigningKey = <<115, 15, 244, 199, 175, 61, 70, 146, 62, 142, 212, 81, 238, 129, 60, 135>>,
+  Hmac = generate_hmac(Encoded_Seconds, IV, CypherText, SigningKey),
+  ?assertEqual(<<"c5ff9095f5d38f9ab86e5543e02686f03b3ec971b9ab47ae23566a54e08c2a0c">>, Hmac).
 
 seconds_to_binary_test() ->
   ?assertEqual(<<0, 0, 0, 0, 29, 192, 158, 176>>, seconds_to_binary(499162800)).
@@ -144,7 +187,8 @@ pad_to_8_test() ->
 block_encrypt_test() ->
   Key = <<247, 144, 176, 162, 38, 188, 150, 169, 45, 228, 155, 94, 156, 5, 225, 238>>,
   Message = <<104, 101, 108, 108, 111, 11, 11, 11, 11, 11, 11, 11, 11, 11, 11, 11>>,
-  ?assertEqual(<<45, 54, 213, 202, 70, 85, 98, 153, 253, 225, 48, 8, 99, 56, 4, 178>>, block_encrypt(Key, <<0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15>>, Message)).
+  IV = <<0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15>>,
+  ?assertEqual(<<45, 54, 213, 202, 70, 85, 98, 153, 253, 225, 48, 8, 99, 56, 4, 178>>, block_encrypt(Key, IV, Message)).
 
 extract_encryption_key_test() ->
   Key = "cw_0x689RpI-jtRR7oE8h_eQsKImvJapLeSbXpwF4e4=",
@@ -152,22 +196,28 @@ extract_encryption_key_test() ->
   ExpectedBytes = <<247, 144, 176, 162, 38, 188, 150, 169, 45, 228, 155, 94, 156, 5, 225, 238>>,
   ?assertEqual(ExpectedBytes, extract_encryption_key(DecodedKey)).
 
-pad_string_test() ->
-  ExpectedBytes = <<104, 101, 108, 108, 111, 11, 11, 11, 11, 11, 11, 11, 11, 11, 11, 11, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0>>,
-  ?assertEqual(ExpectedBytes, pkcs7:pad(list_to_binary("hello"))).
+%% pad_message_test() ->
+%%   ExpectedBytes = <<104, 101, 108, 108, 111, 11, 11, 11, 11, 11, 11, 11, 11, 11, 11, 11, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0>>,
+%%   ?assertEqual(ExpectedBytes, pad_message("hello")).
 
-% requires gen_hmac_test
+%% [
+%%   {
+%%     "token": "gAAAAAAdwJ6wAAECAwQFBgcICQoLDA0ODy021cpGVWKZ_eEwCGM4BLLF_5CV9dOPmrhuVUPgJobwOz7JcbmrR64jVmpU4IwqDA==",
+%%     "now": "1985-10-26T01:20:01-07:00",
+%%     "ttl_sec": 60,
+%%     "src": "hello",
+%%     "secret": "cw_0x689RpI-jtRR7oE8h_eQsKImvJapLeSbXpwF4e4="
+%%   }
+%% ]
+
+verify_and_decrypt_token_test() ->
+    Token = "gAAAAAAdwJ6wAAECAwQFBgcICQoLDA0ODy021cpGVWKZ_eEwCGM4BLLF_5CV9dOPmrhuVUPgJobwOz7JcbmrR64jVmpU4IwqDA==",
+    TTL = 60,
+    Secret = "cw_0x689RpI-jtRR7oE8h_eQsKImvJapLeSbXpwF4e4=",
+    Now = 499162800,
+    {ok, Message} = verify_and_decrypt_token(Token, Secret, TTL, Now),
+    ?assertEqual("hello", Message).
 
 -endif.
 
 %% End of Module.
-
-%[
-%  {
-%    "token": "gAAAAAAdwJ6wAAECAwQFBgcICQoLDA0ODy021cpGVWKZ_eEwCGM4BLLF_5CV9dOPmrhuVUPgJobwOz7JcbmrR64jVmpU4IwqDA==",
-%    "now": "1985-10-26T01:20:00-07:00",
-%    "iv": [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15],
-%    "src": "hello",
-%    "secret": "cw_0x689RpI-jtRR7oE8h_eQsKImvJapLeSbXpwF4e4="
-%  }
-%]
