@@ -47,9 +47,15 @@ generate_token(Message, IV, Seconds, Key) ->
   Padded = pkcs7:pad(iolist_to_binary(Message)),
   <<SigningKey:16/binary, EncryptionKey:16/binary>> = Key,
   CypherText = block_encrypt(EncryptionKey, IV, Padded),
-  Payload = <<?VERSION, EncodedSeconds/binary, IV/binary, CypherText/binary>>,
-  Hmac = generate_hmac(SigningKey, Payload),
+  Payload = payload(EncodedSeconds, IV, CypherText),
+  Hmac = hmac(SigningKey, Payload),
   encode_token(<<Payload/binary, Hmac/binary>>).
+
+payload(EncodedSeconds, IV, CypherText) ->
+    <<?VERSION,  EncodedSeconds/binary, IV/binary, CypherText/binary>>.
+
+hmac(Key, Payload) ->
+    crypto:hmac(sha256, Key, Payload).
 
 encode_token(Token) ->
   binary_to_list(base64url:encode(Token)).
@@ -83,28 +89,10 @@ generate_iv() ->
   crypto:strong_rand_bytes(16).
 
 
-generate_hmac(SigningKey, Bytes) ->
-  base16(crypto:hmac(sha256, SigningKey, Bytes)).
-
 -spec seconds_to_binary(integer()) -> binary().
 seconds_to_binary(Seconds) ->
-  pad_to_8(binary:encode_unsigned(Seconds)).
+  <<Seconds:64/big-unsigned>>.
 
--spec pad_to_8(binary()) -> binary().
-pad_to_8(Binary) ->
-   case (8 - byte_size(Binary) rem 8) rem 8
-     of 0 -> Binary
-      ; N -> <<0:(N*8), Binary/binary>>
-   end.
-
--spec base16(binary()) -> <<_:_*16>>.
-base16(Data) ->
-   << <<(hex(N div 16)), (hex(N rem 16))>> || <<N>> <= Data >>.
-
-hex(N) when N < 10 ->
-  N + $0;
-hex(N) when N < 16 ->
-  N - 10 + $a.
 
 %% pad_message(Message) ->
 %%    Pkcs7 = pkcs7:pad(list_to_binary(Message)),
@@ -138,10 +126,6 @@ decode_key_test() ->
                  129, 60, 135, 247, 144, 176, 162, 38, 188, 150, 169, 45, 228,
                  155, 94, 156, 5, 225, 238>>, decode_key(Key)).
 
-extract_signing_key_test() ->
-  Key = extract_signing_key(<<115, 15, 244, 199, 175, 61, 70, 146, 62, 142, 212, 81, 238, 129, 60, 135, 247, 144, 176, 162, 38, 188, 150, 169, 45, 228, 155, 94, 156, 5, 225, 238 >>),
-  ?assertEqual(<<115, 15, 244, 199, 175, 61, 70, 146, 62, 142, 212, 81, 238, 129, 60, 135>>, Key).
-
 %[
 %  {
 %    "token": "gAAAAAAdwJ6wAAECAwQFBgcICQoLDA0ODy021cpGVWKZ_eEwCGM4BLLF_5CV9dOPmrhuVUPgJobwOz7JcbmrR64jVmpU4IwqDA==",
@@ -161,7 +145,7 @@ generate_hmac_test() ->
   SigningKey = <<115, 15, 244, 199, 175, 61, 70, 146, 62, 142, 212, 81, 238, 129, 60, 135>>,
   Payload = <<128, 0, 0, 0, 0, 29, 192, 158, 176, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 45, 54, 213, 202, 70, 85, 98, 153, 253, 225, 48, 8, 99, 56, 4, 178>>,
   ExpectedHmac = <<"c5ff9095f5d38f9ab86e5543e02686f03b3ec971b9ab47ae23566a54e08c2a0c">>,
-  Hmac = generate_hmac(SigningKey, Payload),
+  Hmac = base16(hmac(SigningKey, Payload)),
   ?assertEqual(ExpectedHmac, Hmac).
 
 generate_hmac4_test() ->
@@ -169,15 +153,11 @@ generate_hmac4_test() ->
   IV = <<0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15>>,
   CypherText = <<45, 54, 213, 202, 70, 85, 98, 153, 253, 225, 48, 8, 99, 56, 4, 178>>,
   SigningKey = <<115, 15, 244, 199, 175, 61, 70, 146, 62, 142, 212, 81, 238, 129, 60, 135>>,
-  Hmac = generate_hmac(Encoded_Seconds, IV, CypherText, SigningKey),
+  Hmac = base16(hmac(SigningKey, payload(Encoded_Seconds, IV, CypherText))),
   ?assertEqual(<<"c5ff9095f5d38f9ab86e5543e02686f03b3ec971b9ab47ae23566a54e08c2a0c">>, Hmac).
 
 seconds_to_binary_test() ->
   ?assertEqual(<<0, 0, 0, 0, 29, 192, 158, 176>>, seconds_to_binary(499162800)).
-
-pad_to_8_test() ->
-  ?assertEqual(<<0, 0, 0, 0, 1, 2, 3, 4>>, pad_to_8(<<1, 2, 3, 4>>)),
-  ?assertEqual(<<1, 2, 3, 4, 1, 2, 3, 4>>, pad_to_8(<<1, 2, 3, 4, 1, 2, 3, 4>>)).
 
 block_encrypt_test() ->
   Key = <<247, 144, 176, 162, 38, 188, 150, 169, 45, 228, 155, 94, 156, 5, 225, 238>>,
@@ -185,11 +165,14 @@ block_encrypt_test() ->
   IV = <<0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15>>,
   ?assertEqual(<<45, 54, 213, 202, 70, 85, 98, 153, 253, 225, 48, 8, 99, 56, 4, 178>>, block_encrypt(Key, IV, Message)).
 
-extract_encryption_key_test() ->
-  Key = "cw_0x689RpI-jtRR7oE8h_eQsKImvJapLeSbXpwF4e4=",
-  DecodedKey = decode_key(Key),
-  ExpectedBytes = <<247, 144, 176, 162, 38, 188, 150, 169, 45, 228, 155, 94, 156, 5, 225, 238>>,
-  ?assertEqual(ExpectedBytes, extract_encryption_key(DecodedKey)).
+-spec base16(binary()) -> <<_:_*16>>.
+base16(Data) ->
+   << <<(hex(N div 16)), (hex(N rem 16))>> || <<N>> <= Data >>.
+
+hex(N) when N < 10 ->
+  N + $0;
+hex(N) when N < 16 ->
+  N - 10 + $a.
 
 %% pad_message_test() ->
 %%   ExpectedBytes = <<104, 101, 108, 108, 111, 11, 11, 11, 11, 11, 11, 11, 11, 11, 11, 11, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0>>,
@@ -212,22 +195,6 @@ extract_encryption_key_test() ->
 %%     Now = 499162800,
 %%     {ok, Message} = verify_and_decrypt_token(Token, Secret, TTL, Now),
 %%     ?assertEqual("hello", Message).
-
-extract_iv_from_token(Token) ->
-  binary_part(Token, {9, 16}).
-
-extract_message_from_token(Token) ->
-  %% TODO: Why 33? taken from the Ruby implementation
-  binary_part(Token, {?PAYOFFSET,  byte_size(Token) - 32}).
-
-extract_signing_key(Key) ->
-  binary_part(Key, {0, 16}).
-
-extract_encryption_key(Key) ->
-  binary_part(Key, {16, 16}).
-
-generate_hmac(Encoded_Seconds, IV, Cyphertext, SigningKey) ->
-  generate_hmac(SigningKey, << <<?VERSION>>/binary, Encoded_Seconds/binary, IV/binary, Cyphertext/binary >>).
 -endif.
 
 %% End of Module.
