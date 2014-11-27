@@ -2,59 +2,74 @@
 
 %% fernet: fernet library's entry point.
 
--export([generate_key/0, encode_key/1, decode_key/1, generate_token/2, verify_and_decrypt_token/3]).
+-export([generate_key/0, encode_key/1, decode_key/1,
+         generate_token/2, verify_and_decrypt_token/3]).
 -define(VERSION, 128).
 -define(BLOCKSIZE, 16).
 -define(PAYOFFSET, 9 + ?BLOCKSIZE).
 
-% Public API
+-type key() :: binary().
+-type encoded_key() :: string().
+-type encoded_token() :: string().
+-export_type([encoded_key/0, encoded_token/0]).
 
--spec generate_key() -> binary().
+%%%%%%%%%%%%%%%%%%
+%%% Public API %%%
+%%%%%%%%%%%%%%%%%%
+
+-spec generate_key() -> key().
 generate_key() ->
   crypto:strong_rand_bytes(32).
 
--spec encode_key(binary()) -> list().
+-spec encode_key(key()) -> encoded_key().
 encode_key(Key) ->
   binary_to_list(base64url:encode(Key)).
 
--spec decode_key(list()) -> binary().
+-spec decode_key(encoded_key()) -> key().
 decode_key(Key) ->
   base64url:decode(Key).
 
--spec encode_token(binary()) -> list().
-encode_token(Token) ->
-  binary_to_list(base64url:encode(Token)).
-
--spec generate_token(list(), binary()) -> list().
+-spec generate_token(iolist(), key()) -> encoded_token().
 generate_token(Message, Key) ->
   generate_token(Message, generate_iv(), timestamp_to_seconds(now()), Key).
 
-generate_token(Message, IV, Seconds, Key) ->
-  Encoded_Seconds = seconds_to_binary(Seconds),
-  Padded = pkcs7:pad(list_to_binary(Message)),
-  Cyphertext = block_encrypt(extract_encryption_key(Key), IV, Padded),
-  Hmac = generate_hmac(Encoded_Seconds, IV, Cyphertext, extract_signing_key(Key)),
-  encode_token(<<<<?VERSION>>/binary, Encoded_Seconds/binary, IV/binary, Cyphertext/binary, Hmac/binary>>).
-
+-spec verify_and_decrypt_token(encoded_token(), key(), Ignored::term()) ->
+    {ok, iodata()}.
 verify_and_decrypt_token(Token, Key, TTL) ->
   verify_and_decrypt_token(Token, Key, TTL, timestamp_to_seconds(now())).
 
-verify_and_decrypt_token(Token, Key, _TTL, _Now) ->
+%%%%%%%%%%%%%%%
+%%% Private %%%
+%%%%%%%%%%%%%%%
+
+generate_token(Message, IV, Seconds, Key) ->
+  EncodedSeconds = seconds_to_binary(Seconds),
+  Padded = pkcs7:pad(iolist_to_binary(Message)),
+  <<SigningKey:16/binary, EncryptionKey:16/binary>> = Key,
+  CypherText = block_encrypt(EncryptionKey, IV, Padded),
+  Payload = <<?VERSION, EncodedSeconds/binary, IV/binary, CypherText/binary>>,
+  Hmac = generate_hmac(SigningKey, Payload),
+  encode_token(<<Payload/binary, Hmac/binary>>).
+
+encode_token(Token) ->
+  binary_to_list(base64url:encode(Token)).
+
+decode_token(EncodedToken) ->
+  base64url:decode(EncodedToken).
+
+verify_and_decrypt_token(EncodedToken, Key, _TTL, _Now) ->
   %% TODO: Verify - see Ruby source for rules...
-  DecodedToken = base64url:decode(Token),
-  IV = extract_iv_from_token(DecodedToken),
-
-  Message = extract_message_from_token(DecodedToken),
+  DecodedToken = decode_token(EncodedToken),
+  MsgSize = byte_size(DecodedToken)-32,
+  <<_Vsn:1/binary, _EncodedSeconds:1/binary, IV:16/binary,
+    Message:MsgSize/binary, _Hmac:32/binary>> = DecodedToken,
   {ok, block_decrypt(decode_key(Key), IV, Message)}.
-
-%% Internals
 
 block_encrypt(Key, IV, Padded) ->
   crypto:block_encrypt(aes_cbc128, Key, IV, Padded).
 
 block_decrypt(Key, IV, Cypher) ->
-  erlang:display("Cypher"),
-  erlang:display(Cypher),
+  io:format("Cypher: ~p~n", [Cypher]),
   crypto:block_decrypt(aes_cbc128, Key, IV, Cypher).
 
 % Take an Erlang now() return and calculate the total number of seconds since
@@ -67,26 +82,6 @@ timestamp_to_seconds({MegaSecs, Secs, MicroSecs}) ->
 generate_iv() ->
   crypto:strong_rand_bytes(16).
 
--spec extract_iv_from_token(binary()) -> binary().
-extract_iv_from_token(Token) ->
-  binary_part(Token, {9, 16}).
-
-extract_message_from_token(Token) ->
-  %% TODO: Why 33? taken from the Ruby implementation
-  binary_part(Token, {?PAYOFFSET,  byte_size(Token) - 32}).
-
-%% Returns the signing key from a 256byte Fernet Key
--spec extract_signing_key(binary()) -> binary().
-extract_signing_key(Key) ->
-  binary_part(Key, {0, 16}).
-
-%% Returns the encryption key from a 256byte Fernet Key
--spec extract_encryption_key(binary()) -> binary().
-extract_encryption_key(Key) ->
-  binary_part(Key, {16, 16}).
-
-generate_hmac(Encoded_Seconds, IV, Cyphertext, SigningKey) ->
-  generate_hmac(SigningKey, << <<?VERSION>>/binary, Encoded_Seconds/binary, IV/binary, Cyphertext/binary >>).
 
 generate_hmac(SigningKey, Bytes) ->
   base16(crypto:hmac(sha256, SigningKey, Bytes)).
@@ -97,7 +92,7 @@ seconds_to_binary(Seconds) ->
 
 -spec pad_to_8(binary()) -> binary().
 pad_to_8(Binary) ->
-   case (8 - size(Binary) rem 8) rem 8
+   case (8 - byte_size(Binary) rem 8) rem 8
      of 0 -> Binary
       ; N -> <<0:(N*8), Binary/binary>>
    end.
@@ -218,6 +213,21 @@ extract_encryption_key_test() ->
 %%     {ok, Message} = verify_and_decrypt_token(Token, Secret, TTL, Now),
 %%     ?assertEqual("hello", Message).
 
+extract_iv_from_token(Token) ->
+  binary_part(Token, {9, 16}).
+
+extract_message_from_token(Token) ->
+  %% TODO: Why 33? taken from the Ruby implementation
+  binary_part(Token, {?PAYOFFSET,  byte_size(Token) - 32}).
+
+extract_signing_key(Key) ->
+  binary_part(Key, {0, 16}).
+
+extract_encryption_key(Key) ->
+  binary_part(Key, {16, 16}).
+
+generate_hmac(Encoded_Seconds, IV, Cyphertext, SigningKey) ->
+  generate_hmac(SigningKey, << <<?VERSION>>/binary, Encoded_Seconds/binary, IV/binary, Cyphertext/binary >>).
 -endif.
 
 %% End of Module.
