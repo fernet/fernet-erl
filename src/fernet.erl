@@ -108,8 +108,8 @@ encode_token(Token) ->
 decode_token(EncodedToken) ->
   base64url:decode(EncodedToken).
 
-validate(Vsn, TS, TTL, _Hmac, _TermsUsedInHMAC, F) -> 
-  try validate_vsn(Vsn), validate_ttl(TS, TTL) of
+validate(Vsn, Now, TS, TTL, _Hmac, _TermsUsedInHMAC, F) -> 
+  try validate_vsn(Vsn), validate_ttl(Now, TS, TTL) of
     ok ->
       F()
   catch
@@ -120,24 +120,23 @@ validate(Vsn, TS, TTL, _Hmac, _TermsUsedInHMAC, F) ->
 validate_vsn(<<128>>) -> ok;
 validate_vsn(_) -> throw(bad_version).
 
-validate_ttl(TS, TTL) ->
-   Diff = timer:now_diff(os:timestamp(), seconds_to_timestamp(TS)),
-   io:print("Help~n"),
+validate_ttl(Now, TS, TTL) ->
+   Diff = timer:now_diff(seconds_to_timestamp(Now), seconds_to_timestamp(TS)),
    AbsDiff = abs(Diff),
    if Diff < 0, AbsDiff < ?MAX_SKEW -> ok; % in the past but within skew
      Diff < 0 -> throw(too_new); % in the past, with way too large of a  skew
-     Diff > 0, Diff < TTL -> ok; % absolutely okay
+     Diff >= 0, Diff < TTL -> ok; % absolutely okay
      Diff > 0, Diff > TTL, Diff-TTL < ?MAX_SKEW -> ok; % past the TTL, but within skew
      Diff > 0, Diff > TTL -> throw(too_old)
    end.
 
-verify_and_decrypt_token(EncodedToken, Key, _TTL, _Now) ->
+verify_and_decrypt_token(EncodedToken, Key, TTL, Now) ->
   %% TODO: Verify - see Ruby source for rules...
   DecodedToken = decode_token(EncodedToken),
   MsgSize = byte_size(DecodedToken)-(1 + ?TSSIZE + ?IVSIZE + ?HMACSIZE),
   <<Vsn:1/binary, TS:8/binary, IV:16/binary, CypherText:MsgSize/binary,
     _Hmac:32/binary>> = DecodedToken,
-  validate(Vsn, binary_to_seconds(TS), _TTL, _Hmac, ok, fun () ->
+  validate(Vsn, Now, binary_to_seconds(TS), TTL, _Hmac, ok, fun () ->
     <<_SigningKey:16/binary, EncryptionKey:16/binary>> = decode_key(Key),
     {ok, pkcs7:unpad(block_decrypt(EncryptionKey, IV, CypherText))}
     end).
@@ -286,6 +285,13 @@ verify_and_decrypt_token_expired_ttl_test() ->
     Secret = "cw_0x689RpI-jtRR7oE8h_eQsKImvJapLeSbXpwF4e4=",
     Now = 499162800 + 70,
     {error, too_old} = verify_and_decrypt_token(Token, Secret, TTL, Now).
+
+verify_and_decrypt_token_too_new_ttl_test() ->
+    Token = "gAAAAAAdwJ6wAAECAwQFBgcICQoLDA0ODy021cpGVWKZ_eEwCGM4BLLF_5CV9dOPmrhuVUPgJobwOz7JcbmrR64jVmpU4IwqDA==",
+    TTL = 60,
+    Secret = "cw_0x689RpI-jtRR7oE8h_eQsKImvJapLeSbXpwF4e4=",
+    Now = 499162800 - 70,
+    {error, too_new} = verify_and_decrypt_token(Token, Secret, TTL, Now).
 
 verify_and_decrypt_token_invalid_version_test() ->
     Token = "gQAAAAAdwJ6wAAECAwQFBgcICQoLDA0ODy021cpGVWKZ_eEwCGM4BLKY7covSkDHw9ma-418Z5yfJ0bAi-R_TUVpW6VSXlO8JA==", 
