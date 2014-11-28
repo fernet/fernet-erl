@@ -19,6 +19,7 @@
 -define(HMACSIZE, 32).
 -define(IVSIZE, 16).
 -define(TSSIZE, 8).
+-define(MAX_SKEW, 60).
 -define(PAYOFFSET, 9 + ?BLOCKSIZE).
 
 -type key() :: binary().
@@ -107,38 +108,39 @@ encode_token(Token) ->
 decode_token(EncodedToken) ->
   base64url:decode(EncodedToken).
 
+validate(Vsn, TS, TTL, _Hmac, _TermsUsedInHMAC, F) -> 
+  try validate_vsn(Vsn), validate_ttl(TS, TTL) of
+    ok ->
+      F()
+  catch
+    throw:Reason ->
+      {error, Reason}
+  end.
 
-%%     validate do
-%%       if valid_base64?
-%%         if unknown_token_version?
-%%           errors.add :version, "is unknown"
-%%         elsif enforce_ttl? && !issued_recent_enough?
-%%           errors.add :issued_timestamp, "is too far in the past: token expired"
-%%         else
-%%           unless signatures_match?
-%%             errors.add :signature, "does not match"
-%%           end
-%%           if unacceptable_clock_slew?
-%%             errors.add :issued_timestamp, "is too far in the future"
-%%           end
-%%           unless ciphertext_multiple_of_block_size?
-%%             errors.add :ciphertext, "is not a multiple of block size"
-%%           end
-%%         end
-%%       else
-%%         errors.add(:token, "invalid base64")
-%%       end
-%%     end
-%% 
+validate_vsn(<<128>>) -> ok;
+validate_vsn(_) -> throw(bad_version).
+
+validate_ttl(TS, TTL) ->
+   Diff = timer:now_diff(os:timestamp(), seconds_to_timestamp(TS)),
+   io:print("Help~n"),
+   AbsDiff = abs(Diff),
+   if Diff < 0, AbsDiff < ?MAX_SKEW -> ok; % in the past but within skew
+     Diff < 0 -> throw(too_new); % in the past, with way too large of a  skew
+     Diff > 0, Diff < TTL -> ok; % absolutely okay
+     Diff > 0, Diff > TTL, Diff-TTL < ?MAX_SKEW -> ok; % past the TTL, but within skew
+     Diff > 0, Diff > TTL -> throw(too_old)
+   end.
 
 verify_and_decrypt_token(EncodedToken, Key, _TTL, _Now) ->
   %% TODO: Verify - see Ruby source for rules...
   DecodedToken = decode_token(EncodedToken),
-  MsgSize = byte_size(DecodedToken)-(1+8+16+32),
-  <<_Vsn:1/binary, _TS:8/binary, IV:16/binary, CypherText:MsgSize/binary,
+  MsgSize = byte_size(DecodedToken)-(1 + ?TSSIZE + ?IVSIZE + ?HMACSIZE),
+  <<Vsn:1/binary, TS:8/binary, IV:16/binary, CypherText:MsgSize/binary,
     _Hmac:32/binary>> = DecodedToken,
-   <<_SigningKey:16/binary, EncryptionKey:16/binary>> = decode_key(Key),
-  {ok, pkcs7:unpad(block_decrypt(EncryptionKey, IV, CypherText))}.
+  validate(Vsn, binary_to_seconds(TS), _TTL, _Hmac, ok, fun () ->
+    <<_SigningKey:16/binary, EncryptionKey:16/binary>> = decode_key(Key),
+    {ok, pkcs7:unpad(block_decrypt(EncryptionKey, IV, CypherText))}
+    end).
 
 block_encrypt(Key, IV, Padded) ->
   crypto:block_encrypt(aes_cbc128, Key, IV, Padded).
@@ -148,9 +150,15 @@ block_decrypt(Key, IV, Cypher) ->
 
 % Take an Erlang now() return and calculate the total number of seconds since
 % the Epoch.
--spec timestamp_to_seconds({integer(), integer(), integer()}) -> integer().
+-spec timestamp_to_seconds(erlang:timestamp()) -> integer().
 timestamp_to_seconds({MegaSecs, Secs, MicroSecs}) ->
   round(((MegaSecs*1000000 + Secs)*1000000 + MicroSecs) / 1000000).
+
+% Take a number of seconds since the Epoch and return an Erlang timestamp().
+% -spec seconds_to_timestamp(integer()) -> {integer(), integer(), integer()}.
+-spec seconds_to_timestamp(integer()) -> erlang:timestamp().
+seconds_to_timestamp(Seconds) ->
+  {Seconds div 1000000, Seconds rem 1000000, 0}.
 
 -spec generate_iv() -> binary().
 generate_iv() ->
@@ -168,16 +176,13 @@ binary_to_seconds(<<Bin:64>>) ->
 -ifdef(TEST).
 -include_lib("eunit/include/eunit.hrl").
 
+% generate_key should generate a 32-byte binary
 generate_key_test() ->
   ?assertEqual(32, byte_size(generate_key())).
 
+% generate_key should generate a 16-byte binary
 generate_iv_test() ->
   ?assertEqual(16, byte_size(generate_iv())).
-
-% timestamp_to_seconds should return the number of seconds since the Unixtime
-% Epoch represented by a tuple {MegaSecs, Secs, MicroSecs} as returned by now()
-timestamp_to_seconds_test() ->
-  ?assertEqual(1412525041, timestamp_to_seconds({1412,525041,377060})).
 
 encode_key_test() ->
   Key = <<115, 15, 244, 199, 175, 61, 70, 146,
@@ -223,11 +228,24 @@ generate_hmac4_test() ->
   Hmac = base16(hmac(SigningKey, payload(Encoded_Seconds, IV, CypherText))),
   ?assertEqual(<<"c5ff9095f5d38f9ab86e5543e02686f03b3ec971b9ab47ae23566a54e08c2a0c">>, Hmac).
 
+%% Convert seconds since the Unixtime Epoch to a 64-bit unsigned big-endian integer.
 seconds_to_binary_test() ->
   ?assertEqual(<<0, 0, 0, 0, 29, 192, 158, 176>>, seconds_to_binary(499162800)).
 
+%% Convert a 64-bit unsigned big-endian integer to seconds since the Unixtime
+%% Epoch.
 binary_to_seconds_test() ->
   ?assertEqual(499162800, binary_to_seconds(<<0, 0, 0, 0, 29, 192, 158, 176>>)).
+
+% timestamp_to_seconds should return the number of seconds since the Unixtime
+% Epoch represented by a tuple {MegaSecs, Secs, MicroSecs} as returned by now()
+timestamp_to_seconds_test() ->
+  ?assertEqual(1412525041, timestamp_to_seconds({1412,525041,377060})).
+
+% seconds_to_timestamp should return a tuple of {MegaSecs, Secs, MicroSecs} from
+% a number of seconds since the Unixtime epoch, droppping the MicroSecs.
+seconds_to_timestamp_test() ->
+  ?assertEqual({1412,525041,0}, seconds_to_timestamp(1412525041)).
 
 block_encrypt_test() ->
   Key = <<247, 144, 176, 162, 38, 188, 150, 169, 45, 228, 155, 94, 156, 5, 225, 238>>,
@@ -267,8 +285,14 @@ verify_and_decrypt_token_expired_ttl_test() ->
     TTL = 60,
     Secret = "cw_0x689RpI-jtRR7oE8h_eQsKImvJapLeSbXpwF4e4=",
     Now = 499162800 + 70,
-    {error, "token expired"} = verify_and_decrypt_token(Token, Secret, TTL, Now).
+    {error, too_old} = verify_and_decrypt_token(Token, Secret, TTL, Now).
 
+verify_and_decrypt_token_invalid_version_test() ->
+    Token = "gQAAAAAdwJ6wAAECAwQFBgcICQoLDA0ODy021cpGVWKZ_eEwCGM4BLKY7covSkDHw9ma-418Z5yfJ0bAi-R_TUVpW6VSXlO8JA==", 
+    TTL = 60,
+    Secret = "cw_0x689RpI-jtRR7oE8h_eQsKImvJapLeSbXpwF4e4=",
+    Now = 499162800,
+    {error, bad_version} = verify_and_decrypt_token(Token, Secret, TTL, Now).
 -endif.
 
 %% End of Module.
