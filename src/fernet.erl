@@ -1,11 +1,24 @@
+%%%-------------------------------------------------------------------
+%%% @author Kevin McDermott <kevin@heroku.com>
+%%% @copyright (C) 2014, Heroku
+%%% @doc
+%%%
+%%% Implements fernet token generation and verification.
+%%%
+%%% See https://github.com/fernet/spec
+%%%
+%%% @end
+%%% Created : 28 Nov 2014 by Kevin McDermott <kevin@heroku.com>
+%%%-------------------------------------------------------------------
 -module(fernet).
-
-%% fernet: fernet library's entry point.
 
 -export([generate_key/0, encode_key/1, decode_key/1,
          generate_token/2, verify_and_decrypt_token/3]).
 -define(VERSION, 128).
 -define(BLOCKSIZE, 16).
+-define(HMACSIZE, 32).
+-define(IVSIZE, 16).
+-define(TSSIZE, 8).
 -define(PAYOFFSET, 9 + ?BLOCKSIZE).
 
 -type key() :: binary().
@@ -13,28 +26,59 @@
 -type encoded_token() :: string().
 -export_type([encoded_key/0, encoded_token/0]).
 
-%%%%%%%%%%%%%%%%%%
-%%% Public API %%%
-%%%%%%%%%%%%%%%%%%
+%%%===================================================================
+%%% API
+%%%===================================================================
 
+%%--------------------------------------------------------------------
+%% @doc
+%% Generate a pseudorandom 32byte key.
+%%
+%% @end
+%%--------------------------------------------------------------------
 -spec generate_key() -> key().
 generate_key() ->
   crypto:strong_rand_bytes(32).
 
+%%--------------------------------------------------------------------
+%% @doc
+%% Encode a key using base64url encoding format.
+%%
+%% @end
+%%--------------------------------------------------------------------
 -spec encode_key(key()) -> encoded_key().
 encode_key(Key) ->
   binary_to_list(base64url:encode(Key)).
 
+%%--------------------------------------------------------------------
+%% @doc
+%% Decode a base64url encoded key.
+%%
+%% @end
+%%--------------------------------------------------------------------
 -spec decode_key(encoded_key()) -> key().
 decode_key(Key) ->
   base64url:decode(Key).
 
+%%--------------------------------------------------------------------
+%% @doc
+%% Generate a token for the provided Message using the supplied Key.
+%%
+%% @end
+%%--------------------------------------------------------------------
 -spec generate_token(iolist(), key()) -> encoded_token().
 generate_token(Message, Key) ->
   generate_token(Message, generate_iv(), timestamp_to_seconds(now()), Key).
 
+
+%%--------------------------------------------------------------------
+%% @doc
+%% Verify a token and extract the message 
+%%
+%% @end
+%%--------------------------------------------------------------------
 -spec verify_and_decrypt_token(encoded_token(), key(), Ignored::term()) ->
-    {ok, iodata()}.
+  {ok, iodata()}.
 verify_and_decrypt_token(Token, Key, TTL) ->
   verify_and_decrypt_token(Token, Key, TTL, timestamp_to_seconds(now())).
 
@@ -63,19 +107,43 @@ encode_token(Token) ->
 decode_token(EncodedToken) ->
   base64url:decode(EncodedToken).
 
+
+%%     validate do
+%%       if valid_base64?
+%%         if unknown_token_version?
+%%           errors.add :version, "is unknown"
+%%         elsif enforce_ttl? && !issued_recent_enough?
+%%           errors.add :issued_timestamp, "is too far in the past: token expired"
+%%         else
+%%           unless signatures_match?
+%%             errors.add :signature, "does not match"
+%%           end
+%%           if unacceptable_clock_slew?
+%%             errors.add :issued_timestamp, "is too far in the future"
+%%           end
+%%           unless ciphertext_multiple_of_block_size?
+%%             errors.add :ciphertext, "is not a multiple of block size"
+%%           end
+%%         end
+%%       else
+%%         errors.add(:token, "invalid base64")
+%%       end
+%%     end
+%% 
+
 verify_and_decrypt_token(EncodedToken, Key, _TTL, _Now) ->
   %% TODO: Verify - see Ruby source for rules...
   DecodedToken = decode_token(EncodedToken),
-  MsgSize = byte_size(DecodedToken)-32,
-  <<_Vsn:1/binary, _EncodedSeconds:1/binary, IV:16/binary,
-    Message:MsgSize/binary, _Hmac:32/binary>> = DecodedToken,
-  {ok, block_decrypt(decode_key(Key), IV, Message)}.
+  MsgSize = byte_size(DecodedToken)-(1+8+16+32),
+  <<_Vsn:1/binary, _TS:8/binary, IV:16/binary, CypherText:MsgSize/binary,
+    _Hmac:32/binary>> = DecodedToken,
+   <<_SigningKey:16/binary, EncryptionKey:16/binary>> = decode_key(Key),
+  {ok, pkcs7:unpad(block_decrypt(EncryptionKey, IV, CypherText))}.
 
 block_encrypt(Key, IV, Padded) ->
   crypto:block_encrypt(aes_cbc128, Key, IV, Padded).
 
 block_decrypt(Key, IV, Cypher) ->
-  io:format("Cypher: ~p~n", [Cypher]),
   crypto:block_decrypt(aes_cbc128, Key, IV, Cypher).
 
 % Take an Erlang now() return and calculate the total number of seconds since
@@ -88,15 +156,13 @@ timestamp_to_seconds({MegaSecs, Secs, MicroSecs}) ->
 generate_iv() ->
   crypto:strong_rand_bytes(16).
 
-
 -spec seconds_to_binary(integer()) -> binary().
 seconds_to_binary(Seconds) ->
   <<Seconds:64/big-unsigned>>.
 
-
-%% pad_message(Message) ->
-%%    Pkcs7 = pkcs7:pad(list_to_binary(Message)),
-%%    <<Pkcs7/binary, 0:((32-(size(Pkcs7) rem 32))*8)>>.
+-spec binary_to_seconds(binary()) -> integer().
+binary_to_seconds(<<Bin:64>>) ->
+  Bin.
 
 %% Tests
 -ifdef(TEST).
@@ -139,7 +205,8 @@ decode_key_test() ->
 %
 generate_token_test() ->
   Tok = generate_token("hello", <<0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15>>, 499162800, decode_key("cw_0x689RpI-jtRR7oE8h_eQsKImvJapLeSbXpwF4e4=")),
-  ?assertEqual("gAAAAAAdwJ6wAAECAwQFBgcICQoLDA0ODy021cpGVWKZ_eEwCGM4BLLF_5CV9dOPmrhuVUPgJobwOz7JcbmrR64jVmpU4IwqDA==", Tok).
+  ?assertEqual(decode_token("gAAAAAAdwJ6wAAECAwQFBgcICQoLDA0ODy021cpGVWKZ_eEwCGM4BLLF_5CV9dOPmrhuVUPgJobwOz7JcbmrR64jVmpU4IwqDA=="),
+               decode_token(Tok)).
 
 generate_hmac_test() ->
   SigningKey = <<115, 15, 244, 199, 175, 61, 70, 146, 62, 142, 212, 81, 238, 129, 60, 135>>,
@@ -159,6 +226,9 @@ generate_hmac4_test() ->
 seconds_to_binary_test() ->
   ?assertEqual(<<0, 0, 0, 0, 29, 192, 158, 176>>, seconds_to_binary(499162800)).
 
+binary_to_seconds_test() ->
+  ?assertEqual(499162800, binary_to_seconds(<<0, 0, 0, 0, 29, 192, 158, 176>>)).
+
 block_encrypt_test() ->
   Key = <<247, 144, 176, 162, 38, 188, 150, 169, 45, 228, 155, 94, 156, 5, 225, 238>>,
   Message = <<104, 101, 108, 108, 111, 11, 11, 11, 11, 11, 11, 11, 11, 11, 11, 11>>,
@@ -174,10 +244,6 @@ hex(N) when N < 10 ->
 hex(N) when N < 16 ->
   N - 10 + $a.
 
-%% pad_message_test() ->
-%%   ExpectedBytes = <<104, 101, 108, 108, 111, 11, 11, 11, 11, 11, 11, 11, 11, 11, 11, 11, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0>>,
-%%   ?assertEqual(ExpectedBytes, pad_message("hello")).
-
 %% [
 %%   {
 %%     "token": "gAAAAAAdwJ6wAAECAwQFBgcICQoLDA0ODy021cpGVWKZ_eEwCGM4BLLF_5CV9dOPmrhuVUPgJobwOz7JcbmrR64jVmpU4IwqDA==",
@@ -188,13 +254,21 @@ hex(N) when N < 16 ->
 %%   }
 %% ]
 
-%% verify_and_decrypt_token_test() ->
-%%     Token = "gAAAAAAdwJ6wAAECAwQFBgcICQoLDA0ODy021cpGVWKZ_eEwCGM4BLLF_5CV9dOPmrhuVUPgJobwOz7JcbmrR64jVmpU4IwqDA==",
-%%     TTL = 60,
-%%     Secret = "cw_0x689RpI-jtRR7oE8h_eQsKImvJapLeSbXpwF4e4=",
-%%     Now = 499162800,
-%%     {ok, Message} = verify_and_decrypt_token(Token, Secret, TTL, Now),
-%%     ?assertEqual("hello", Message).
+verify_and_decrypt_token_test() ->
+    Token = "gAAAAAAdwJ6wAAECAwQFBgcICQoLDA0ODy021cpGVWKZ_eEwCGM4BLLF_5CV9dOPmrhuVUPgJobwOz7JcbmrR64jVmpU4IwqDA==",
+    TTL = 60,
+    Secret = "cw_0x689RpI-jtRR7oE8h_eQsKImvJapLeSbXpwF4e4=",
+    Now = 499162800,
+    {ok, Message} = verify_and_decrypt_token(Token, Secret, TTL, Now),
+    ?assertEqual("hello", binary_to_list(Message)).
+
+verify_and_decrypt_token_expired_ttl_test() ->
+    Token = "gAAAAAAdwJ6wAAECAwQFBgcICQoLDA0ODy021cpGVWKZ_eEwCGM4BLLF_5CV9dOPmrhuVUPgJobwOz7JcbmrR64jVmpU4IwqDA==",
+    TTL = 60,
+    Secret = "cw_0x689RpI-jtRR7oE8h_eQsKImvJapLeSbXpwF4e4=",
+    Now = 499162800 + 70,
+    {error, "token expired"} = verify_and_decrypt_token(Token, Secret, TTL, Now).
+
 -endif.
 
 %% End of Module.
