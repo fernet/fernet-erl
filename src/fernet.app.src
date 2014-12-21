@@ -8,7 +8,8 @@
   {registered, []},
   {applications, [
                   kernel,
-                  stdlib
+                  stdlib,
+                  base64url
                  ]},
   {env, []}
  ]}.
