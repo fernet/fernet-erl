@@ -14,6 +14,7 @@
 
 -export([generate_key/0, encode_key/1, decode_key/1,
          generate_token/2, verify_and_decrypt_token/3]).
+
 -define(VERSION, 128).
 -define(BLOCKSIZE, 16).
 -define(HMACSIZE, 32).
@@ -69,8 +70,7 @@ decode_key(Key) ->
 %%--------------------------------------------------------------------
 -spec generate_token(iolist(), key()) -> encoded_token().
 generate_token(Message, Key) ->
-  generate_token(Message, generate_iv(), timestamp_to_seconds(now()), Key).
-
+  generate_token(Message, generate_iv(), erlang:system_time(seconds), Key).
 
 %%--------------------------------------------------------------------
 %% @doc
@@ -78,10 +78,12 @@ generate_token(Message, Key) ->
 %%
 %% @end
 %%--------------------------------------------------------------------
--spec verify_and_decrypt_token(encoded_token(), key(), Ignored::term()) ->
+-spec verify_and_decrypt_token(encoded_token(), key(), TTL::integer() | infinity) ->
   {ok, iodata()}.
+verify_and_decrypt_token(Token, Key, infinity) ->
+    verify_and_decrypt_token(Token, Key, infinity, undefined);
 verify_and_decrypt_token(Token, Key, TTL) ->
-  verify_and_decrypt_token(Token, Key, TTL, timestamp_to_seconds(now())).
+    verify_and_decrypt_token(Token, Key, TTL, erlang:system_time(seconds)).
 
 %%%%%%%%%%%%%%%
 %%% Private %%%
@@ -108,20 +110,22 @@ encode_token(Token) ->
 decode_token(EncodedToken) ->
   base64url:decode(EncodedToken).
 
-validate(Vsn, Now, TS, TTL, _Hmac, _TermsUsedInHMAC, F) -> 
-  try validate_vsn(Vsn), validate_ttl(Now, TS, TTL) of
-    ok ->
-      F()
-  catch
-    throw:Reason ->
-      {error, Reason}
-  end.
+validate(Vsn, Opts, TS, TTL, _Hmac, _TermsUsedInHMAC, F) -> 
+    try validate_vsn(Vsn), validate_ttl(Opts, TS, TTL) of
+        ok ->
+            F()
+    catch
+        throw:Reason ->
+            {error, Reason}
+    end.
 
 validate_vsn(<<128>>) -> ok;
 validate_vsn(_) -> throw(bad_version).
 
+validate_ttl(_, _, infinity) ->
+    ok;
 validate_ttl(Now, TS, TTL) ->
-   Diff = timer:now_diff(seconds_to_timestamp(Now), seconds_to_timestamp(TS)),
+   Diff = Now - TS,
    AbsDiff = abs(Diff),
    if Diff < 0, AbsDiff < ?MAX_SKEW -> ok; % in the past but within skew
      Diff < 0 -> throw(too_new); % in the past, with way too large of a  skew
@@ -146,18 +150,6 @@ block_encrypt(Key, IV, Padded) ->
 
 block_decrypt(Key, IV, Cypher) ->
   crypto:block_decrypt(aes_cbc128, Key, IV, Cypher).
-
-% Take an Erlang now() return and calculate the total number of seconds since
-% the Epoch.
--spec timestamp_to_seconds(erlang:timestamp()) -> integer().
-timestamp_to_seconds({MegaSecs, Secs, MicroSecs}) ->
-  round(((MegaSecs*1000000 + Secs)*1000000 + MicroSecs) / 1000000).
-
-% Take a number of seconds since the Epoch and return an Erlang timestamp().
-% -spec seconds_to_timestamp(integer()) -> {integer(), integer(), integer()}.
--spec seconds_to_timestamp(integer()) -> erlang:timestamp().
-seconds_to_timestamp(Seconds) ->
-  {Seconds div 1000000, Seconds rem 1000000, 0}.
 
 -spec generate_iv() -> binary().
 generate_iv() ->
@@ -236,16 +228,6 @@ seconds_to_binary_test() ->
 binary_to_seconds_test() ->
   ?assertEqual(499162800, binary_to_seconds(<<0, 0, 0, 0, 29, 192, 158, 176>>)).
 
-% timestamp_to_seconds should return the number of seconds since the Unixtime
-% Epoch represented by a tuple {MegaSecs, Secs, MicroSecs} as returned by now()
-timestamp_to_seconds_test() ->
-  ?assertEqual(1412525041, timestamp_to_seconds({1412,525041,377060})).
-
-% seconds_to_timestamp should return a tuple of {MegaSecs, Secs, MicroSecs} from
-% a number of seconds since the Unixtime epoch, droppping the MicroSecs.
-seconds_to_timestamp_test() ->
-  ?assertEqual({1412,525041,0}, seconds_to_timestamp(1412525041)).
-
 block_encrypt_test() ->
   Key = <<247, 144, 176, 162, 38, 188, 150, 169, 45, 228, 155, 94, 156, 5, 225, 238>>,
   Message = <<104, 101, 108, 108, 111, 11, 11, 11, 11, 11, 11, 11, 11, 11, 11, 11>>,
@@ -283,7 +265,7 @@ verify_and_decrypt_token_expired_ttl_test() ->
     Token = "gAAAAAAdwJ6wAAECAwQFBgcICQoLDA0ODy021cpGVWKZ_eEwCGM4BLLF_5CV9dOPmrhuVUPgJobwOz7JcbmrR64jVmpU4IwqDA==",
     TTL = 60,
     Secret = "cw_0x689RpI-jtRR7oE8h_eQsKImvJapLeSbXpwF4e4=",
-    Now = 499162800 + 70,
+    Now = 499162800 + 121,
     {error, too_old} = verify_and_decrypt_token(Token, Secret, TTL, Now).
 
 verify_and_decrypt_token_too_new_ttl_test() ->
@@ -292,6 +274,13 @@ verify_and_decrypt_token_too_new_ttl_test() ->
     Secret = "cw_0x689RpI-jtRR7oE8h_eQsKImvJapLeSbXpwF4e4=",
     Now = 499162800 - 70,
     {error, too_new} = verify_and_decrypt_token(Token, Secret, TTL, Now).
+
+verify_and_decrypt_token_ignore_ttl_test() ->
+    Token = "gAAAAAAdwJ6wAAECAwQFBgcICQoLDA0ODy021cpGVWKZ_eEwCGM4BLLF_5CV9dOPmrhuVUPgJobwOz7JcbmrR64jVmpU4IwqDA==",
+    TTL = infinity,
+    Secret = "cw_0x689RpI-jtRR7oE8h_eQsKImvJapLeSbXpwF4e4=",
+    Now = 499162800 - 70,
+    {ok, <<"hello">>} = verify_and_decrypt_token(Token, Secret, TTL, Now).
 
 verify_and_decrypt_token_invalid_version_test() ->
     Token = "gQAAAAAdwJ6wAAECAwQFBgcICQoLDA0ODy021cpGVWKZ_eEwCGM4BLKY7covSkDHw9ma-418Z5yfJ0bAi-R_TUVpW6VSXlO8JA==", 
