@@ -50,7 +50,7 @@ generate_key() ->
 %%--------------------------------------------------------------------
 -spec encode_key(key()) -> encoded_key().
 encode_key(Key) ->
-  binary_to_list(base64url:encode(Key)).
+  binary_to_list(base64url:encode_mime(Key)).
 
 %%--------------------------------------------------------------------
 %% @doc
@@ -105,7 +105,7 @@ hmac(Key, Payload) ->
     crypto:hmac(sha256, Key, Payload).
 
 encode_token(Token) ->
-  binary_to_list(base64url:encode(Token)).
+  binary_to_list(base64url:encode_mime(Token)).
 
 decode_token(EncodedToken) ->
   try
@@ -222,13 +222,14 @@ encode_key_test() ->
           62, 142, 212, 81, 238, 129, 60, 135, 247,
           144, 176, 162, 38, 188, 150, 169, 45,
           228, 155, 94, 156, 5, 225, 238>>,
-  ?assertEqual("cw_0x689RpI-jtRR7oE8h_eQsKImvJapLeSbXpwF4e4", encode_key(Key)).
+  ?assertEqual("cw_0x689RpI-jtRR7oE8h_eQsKImvJapLeSbXpwF4e4=", encode_key(Key)).
 
 decode_key_test() ->
   Key = "cw_0x689RpI-jtRR7oE8h_eQsKImvJapLeSbXpwF4e4=",
-  ?assertEqual(<<115, 15, 244, 199, 175, 61, 70, 146, 62, 142, 212, 81, 238,
-                 129, 60, 135, 247, 144, 176, 162, 38, 188, 150, 169, 45, 228,
-                 155, 94, 156, 5, 225, 238>>, decode_key(Key)).
+  ?assertEqual(<<115, 15, 244, 199, 175, 61, 70, 146,
+                 62, 142, 212, 81, 238, 129, 60, 135, 247,
+                 144, 176, 162, 38, 188, 150, 169, 45,
+                 228, 155, 94, 156, 5, 225, 238>>, decode_key(Key)).
 
 %[
 %  {
