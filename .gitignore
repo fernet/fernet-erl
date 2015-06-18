@@ -12,3 +12,4 @@ tmp
 ebin
 *~
 _build
+TEST-*.xml

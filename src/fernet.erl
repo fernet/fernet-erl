@@ -35,7 +35,6 @@
 %%%===================================================================
 %%% API
 %%%===================================================================
-
 %% @doc Generate a pseudorandom 32 bytes key.
 -spec generate_key() -> key().
 generate_key() ->
@@ -71,7 +70,7 @@ generate_token(Message, Key) ->
 
 %% @doc Verify a token and extract the message 
 -spec verify_and_decrypt_token(encoded_token(), key(), TTL::integer() | infinity) ->
-    {ok, iodata()}.
+    {ok, binary()} | {error, atom()}.
 verify_and_decrypt_token(Token, Key, infinity) ->
     verify_and_decrypt_token(Token, Key, infinity, undefined);
 verify_and_decrypt_token(Token, Key, TTL) ->
@@ -80,32 +79,57 @@ verify_and_decrypt_token(Token, Key, TTL) ->
 %%%===================================================================
 %%% Private
 %%%===================================================================
-
 generate_token(Message, IV, Seconds, Key) ->
-  EncodedSeconds = seconds_to_binary(Seconds),
-  Padded = pkcs7:pad(iolist_to_binary(Message)),
-  <<SigningKey:16/binary, EncryptionKey:16/binary>> = base64url:decode(Key),
-  CypherText = block_encrypt(EncryptionKey, IV, Padded),
-  Payload = payload(EncodedSeconds, IV, CypherText),
-  Hmac = hmac(SigningKey, Payload),
-  encode_token(<<Payload/binary, Hmac/binary>>).
+    EncodedSeconds = seconds_to_binary(Seconds),
+    Padded = pkcs7:pad(iolist_to_binary(Message)),
+    <<SigningKey:16/binary, EncryptionKey:16/binary>> = base64url:decode(Key),
+    CypherText = block_encrypt(EncryptionKey, IV, Padded),
+    Payload = payload(EncodedSeconds, IV, CypherText),
+    Hmac = hmac(SigningKey, Payload),
+    encode_token(<<Payload/binary, Hmac/binary>>).
 
-payload(EncodedSeconds, IV, CypherText) ->
-    <<?VERSION,  EncodedSeconds/binary, IV/binary, CypherText/binary>>.
-
-hmac(Key, Payload) ->
-    crypto:hmac(sha256, Key, Payload).
+verify_and_decrypt_token(EncodedToken, Key, TTL, Now) ->
+    try
+        DecodedToken = decode_token(EncodedToken),
+        MsgSize = byte_size(DecodedToken)-(1 + ?TSSIZE + ?IVSIZE + ?HMACSIZE),
+        validate_msg_size(MsgSize),
+        <<Vsn:1/binary, TS:8/binary, IV:16/binary, CypherText:MsgSize/binary,
+        Hmac:32/binary>> = DecodedToken,
+        <<SigningKey:16/binary, EncryptionKey:16/binary>> = decode_key(Key),
+        validate_vsn(Vsn),
+        validate_ttl(Now, binary_to_seconds(TS), TTL),
+        validate_hmac(Hmac, SigningKey, {TS, IV, CypherText}),
+        block_decrypt(EncryptionKey, IV, CypherText)
+    of
+        Decrypted ->
+            try
+                {ok, pkcs7:unpad(Decrypted)}
+            catch
+                error:_ -> {error, payload_padding}
+            end
+    catch
+        throw:invalid_base64 = Err -> {error, Err};
+        throw:too_short = Err -> {error, Err};
+        throw:payload_size_not_multiple_of_block_size = Err -> {error, Err};
+        throw:bad_version = Err -> {error, Err};
+        throw:too_old = Err -> {error, Err};
+        throw:too_new = Err -> {error, Err};
+        throw:incorrect_mac = Err -> {error, Err}
+    end.
 
 encode_token(Token) ->
     base64url:encode_mime(Token).
 
 decode_token(EncodedToken) ->
-  try
-      base64url:decode(EncodedToken)
-  catch
-      error:{badarg, _Char} -> throw(invalid_base64)
-  end.
+    try
+        base64url:decode(EncodedToken)
+    catch
+        error:{badarg, _Char} -> throw(invalid_base64)
+    end.
 
+%%-------------------------------------------------------------------
+%% Validation Helpers
+%%-------------------------------------------------------------------
 validate_msg_size(MsgSize) when MsgSize < 0 ->
     throw(too_short);
 validate_msg_size(MsgSize) when MsgSize rem ?BLOCKSIZE =/= 0 ->
@@ -135,6 +159,15 @@ validate_hmac(Hmac, SigningKey, {TS, IV, CypherText}) ->
         false -> throw(incorrect_mac)
     end.
 
+%%-------------------------------------------------------------------
+%% Crypto Helpers
+%%-------------------------------------------------------------------
+payload(EncodedSeconds, IV, CypherText) ->
+    <<?VERSION,  EncodedSeconds/binary, IV/binary, CypherText/binary>>.
+
+hmac(Key, Payload) ->
+    crypto:hmac(sha256, Key, Payload).
+
 %% @doc Verifies two hashes for matching purpose, in constant time. That allows
 %% a safer verification as no attacker can use the time it takes to compare hash
 %% values to find an attack vector (past figuring out the complexity)
@@ -146,56 +179,32 @@ verify_in_constant_time(X, Y) ->
             false
     end.
 
-verify_in_constant_time(<<X,RestX/binary>>, <<Y,RestY/binary>>, Result) ->
-        verify_in_constant_time(RestX, RestY, (X bxor Y) bor Result);
-verify_in_constant_time(<<>>, <<>>, Result) ->
-        Result == 0.
 
-verify_and_decrypt_token(EncodedToken, Key, TTL, Now) ->
-  %% TODO: Verify - see Ruby source for rules...
-  try
-      DecodedToken = decode_token(EncodedToken),
-      MsgSize = byte_size(DecodedToken)-(1 + ?TSSIZE + ?IVSIZE + ?HMACSIZE),
-      validate_msg_size(MsgSize),
-      <<Vsn:1/binary, TS:8/binary, IV:16/binary, CypherText:MsgSize/binary,
-        Hmac:32/binary>> = DecodedToken,
-      <<SigningKey:16/binary, EncryptionKey:16/binary>> = decode_key(Key),
-      validate_vsn(Vsn),
-      validate_ttl(Now, binary_to_seconds(TS), TTL),
-      validate_hmac(Hmac, SigningKey, {TS, IV, CypherText}),
-      Decrypted = block_decrypt(EncryptionKey, IV, CypherText),
-      try
-          {ok, pkcs7:unpad(Decrypted)}
-      catch
-          error:_ -> {error, payload_padding}
-      end
-  catch
-      throw:invalid_base64 = Err -> {error, Err};
-      throw:too_short = Err -> {error, Err};
-      throw:payload_size_not_multiple_of_block_size = Err -> {error, Err};
-      throw:bad_version = Err -> {error, Err};
-      throw:too_old = Err -> {error, Err};
-      throw:too_new = Err -> {error, Err};
-      throw:incorrect_mac = Err -> {error, Err}
-  end.
+verify_in_constant_time(<<X,RestX/binary>>, <<Y,RestY/binary>>, Result) ->
+    verify_in_constant_time(RestX, RestY, (X bxor Y) bor Result);
+verify_in_constant_time(<<>>, <<>>, Result) ->
+    Result == 0.
 
 block_encrypt(Key, IV, Padded) ->
-  crypto:block_encrypt(aes_cbc128, Key, IV, Padded).
+    crypto:block_encrypt(aes_cbc128, Key, IV, Padded).
 
 block_decrypt(Key, IV, Cypher) ->
-  crypto:block_decrypt(aes_cbc128, Key, IV, Cypher).
+    crypto:block_decrypt(aes_cbc128, Key, IV, Cypher).
 
 -spec generate_iv() -> <<_:128>>.
 generate_iv() ->
-  crypto:strong_rand_bytes(16).
+    crypto:strong_rand_bytes(16).
 
+%%-------------------------------------------------------------------
+%% Time Helpers
+%%-------------------------------------------------------------------
 -spec seconds_to_binary(integer()) -> binary().
 seconds_to_binary(Seconds) ->
-  <<Seconds:64/big-unsigned>>.
+    <<Seconds:64/big-unsigned>>.
 
 -spec binary_to_seconds(binary()) -> integer().
 binary_to_seconds(<<Bin:64>>) ->
-  Bin.
+    Bin.
 
 -spec erlang_system_seconds() -> integer().
 erlang_system_seconds() ->
@@ -224,7 +233,7 @@ timestamp_to_seconds_test() ->
 
 % generate_key should generate a 32-byte binary
 generate_key_test() ->
-  ?assertEqual(32, byte_size(generate_key())).
+    ?assertEqual(32, byte_size(generate_key())).
 
 % generate_key should generate a 32-byte binary
 generate_encoded_key_test() ->
@@ -232,21 +241,22 @@ generate_encoded_key_test() ->
 
 % generate_iv should generate a 16-byte binary
 generate_iv_test() ->
-  ?assertEqual(16, byte_size(generate_iv())).
+    ?assertEqual(16, byte_size(generate_iv())).
 
 encode_key_test() ->
-  Key = <<115, 15, 244, 199, 175, 61, 70, 146,
-          62, 142, 212, 81, 238, 129, 60, 135, 247,
-          144, 176, 162, 38, 188, 150, 169, 45,
-          228, 155, 94, 156, 5, 225, 238>>,
-  ?assertEqual(<<"cw_0x689RpI-jtRR7oE8h_eQsKImvJapLeSbXpwF4e4=">>, encode_key(Key)).
+    Key = <<115, 15, 244, 199, 175, 61, 70, 146,
+            62, 142, 212, 81, 238, 129, 60, 135, 247,
+            144, 176, 162, 38, 188, 150, 169, 45,
+            228, 155, 94, 156, 5, 225, 238>>,
+    ?assertEqual(<<"cw_0x689RpI-jtRR7oE8h_eQsKImvJapLeSbXpwF4e4=">>, encode_key(Key)).
 
 decode_key_test() ->
-  Key = "cw_0x689RpI-jtRR7oE8h_eQsKImvJapLeSbXpwF4e4=",
-  ?assertEqual(<<115, 15, 244, 199, 175, 61, 70, 146,
-                 62, 142, 212, 81, 238, 129, 60, 135, 247,
-                 144, 176, 162, 38, 188, 150, 169, 45,
-                 228, 155, 94, 156, 5, 225, 238>>, decode_key(Key)).
+    Key = "cw_0x689RpI-jtRR7oE8h_eQsKImvJapLeSbXpwF4e4=",
+    ?assertEqual(<<115, 15, 244, 199, 175, 61, 70, 146,
+                   62, 142, 212, 81, 238, 129, 60, 135, 247,
+                   144, 176, 162, 38, 188, 150, 169, 45,
+                   228, 155, 94, 156, 5, 225, 238>>,
+                 decode_key(Key)).
 
 %[
 %  {
@@ -260,50 +270,50 @@ decode_key_test() ->
 % 1985-10-26T01:20:00-07:00 == 499162800 Seconds since the epoch
 %
 generate_token_test_() ->
-  Tok = generate_token("hello", <<0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15>>, 499162800, "cw_0x689RpI-jtRR7oE8h_eQsKImvJapLeSbXpwF4e4="),
-  [?_assertEqual(<<"gAAAAAAdwJ6wAAECAwQFBgcICQoLDA0ODy021cpGVWKZ_eEwCGM4BLLF_5CV9dOPmrhuVUPgJobwOz7JcbmrR64jVmpU4IwqDA==">>,
-                 Tok),
-   ?_assertEqual(decode_token("gAAAAAAdwJ6wAAECAwQFBgcICQoLDA0ODy021cpGVWKZ_eEwCGM4BLLF_5CV9dOPmrhuVUPgJobwOz7JcbmrR64jVmpU4IwqDA=="),
-                 decode_token(Tok))].
+    Tok = generate_token("hello", <<0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15>>, 499162800, "cw_0x689RpI-jtRR7oE8h_eQsKImvJapLeSbXpwF4e4="),
+    [?_assertEqual(<<"gAAAAAAdwJ6wAAECAwQFBgcICQoLDA0ODy021cpGVWKZ_eEwCGM4BLLF_5CV9dOPmrhuVUPgJobwOz7JcbmrR64jVmpU4IwqDA==">>,
+                   Tok),
+     ?_assertEqual(decode_token("gAAAAAAdwJ6wAAECAwQFBgcICQoLDA0ODy021cpGVWKZ_eEwCGM4BLLF_5CV9dOPmrhuVUPgJobwOz7JcbmrR64jVmpU4IwqDA=="),
+                   decode_token(Tok))].
 
 generate_hmac_test() ->
-  SigningKey = <<115, 15, 244, 199, 175, 61, 70, 146, 62, 142, 212, 81, 238, 129, 60, 135>>,
-  Payload = <<128, 0, 0, 0, 0, 29, 192, 158, 176, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 45, 54, 213, 202, 70, 85, 98, 153, 253, 225, 48, 8, 99, 56, 4, 178>>,
-  ExpectedHmac = <<"c5ff9095f5d38f9ab86e5543e02686f03b3ec971b9ab47ae23566a54e08c2a0c">>,
-  Hmac = base16(hmac(SigningKey, Payload)),
-  ?assertEqual(ExpectedHmac, Hmac).
+    SigningKey = <<115, 15, 244, 199, 175, 61, 70, 146, 62, 142, 212, 81, 238, 129, 60, 135>>,
+    Payload = <<128, 0, 0, 0, 0, 29, 192, 158, 176, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 45, 54, 213, 202, 70, 85, 98, 153, 253, 225, 48, 8, 99, 56, 4, 178>>,
+    ExpectedHmac = <<"c5ff9095f5d38f9ab86e5543e02686f03b3ec971b9ab47ae23566a54e08c2a0c">>,
+    Hmac = base16(hmac(SigningKey, Payload)),
+    ?assertEqual(ExpectedHmac, Hmac).
 
 generate_hmac4_test() ->
-  Encoded_Seconds = <<0, 0, 0, 0, 29, 192, 158, 176>>,
-  IV = <<0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15>>,
-  CypherText = <<45, 54, 213, 202, 70, 85, 98, 153, 253, 225, 48, 8, 99, 56, 4, 178>>,
-  SigningKey = <<115, 15, 244, 199, 175, 61, 70, 146, 62, 142, 212, 81, 238, 129, 60, 135>>,
-  Hmac = base16(hmac(SigningKey, payload(Encoded_Seconds, IV, CypherText))),
-  ?assertEqual(<<"c5ff9095f5d38f9ab86e5543e02686f03b3ec971b9ab47ae23566a54e08c2a0c">>, Hmac).
+    Encoded_Seconds = <<0, 0, 0, 0, 29, 192, 158, 176>>,
+    IV = <<0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15>>,
+    CypherText = <<45, 54, 213, 202, 70, 85, 98, 153, 253, 225, 48, 8, 99, 56, 4, 178>>,
+    SigningKey = <<115, 15, 244, 199, 175, 61, 70, 146, 62, 142, 212, 81, 238, 129, 60, 135>>,
+    Hmac = base16(hmac(SigningKey, payload(Encoded_Seconds, IV, CypherText))),
+    ?assertEqual(<<"c5ff9095f5d38f9ab86e5543e02686f03b3ec971b9ab47ae23566a54e08c2a0c">>, Hmac).
 
 %% Convert seconds since the Unixtime Epoch to a 64-bit unsigned big-endian integer.
 seconds_to_binary_test() ->
-  ?assertEqual(<<0, 0, 0, 0, 29, 192, 158, 176>>, seconds_to_binary(499162800)).
+    ?assertEqual(<<0, 0, 0, 0, 29, 192, 158, 176>>, seconds_to_binary(499162800)).
 
 %% Convert a 64-bit unsigned big-endian integer to seconds since the Unixtime
 %% Epoch.
 binary_to_seconds_test() ->
-  ?assertEqual(499162800, binary_to_seconds(<<0, 0, 0, 0, 29, 192, 158, 176>>)).
+    ?assertEqual(499162800, binary_to_seconds(<<0, 0, 0, 0, 29, 192, 158, 176>>)).
 
 block_encrypt_test() ->
-  Key = <<247, 144, 176, 162, 38, 188, 150, 169, 45, 228, 155, 94, 156, 5, 225, 238>>,
-  Message = <<104, 101, 108, 108, 111, 11, 11, 11, 11, 11, 11, 11, 11, 11, 11, 11>>,
-  IV = <<0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15>>,
-  ?assertEqual(<<45, 54, 213, 202, 70, 85, 98, 153, 253, 225, 48, 8, 99, 56, 4, 178>>, block_encrypt(Key, IV, Message)).
+    Key = <<247, 144, 176, 162, 38, 188, 150, 169, 45, 228, 155, 94, 156, 5, 225, 238>>,
+    Message = <<104, 101, 108, 108, 111, 11, 11, 11, 11, 11, 11, 11, 11, 11, 11, 11>>,
+    IV = <<0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15>>,
+    ?assertEqual(<<45, 54, 213, 202, 70, 85, 98, 153, 253, 225, 48, 8, 99, 56, 4, 178>>, block_encrypt(Key, IV, Message)).
 
 -spec base16(binary()) -> <<_:_*16>>.
 base16(Data) ->
-   << <<(hex(N div 16)), (hex(N rem 16))>> || <<N>> <= Data >>.
+    << <<(hex(N div 16)), (hex(N rem 16))>> || <<N>> <= Data >>.
 
 hex(N) when N < 10 ->
-  N + $0;
+    N + $0;
 hex(N) when N < 16 ->
-  N - 10 + $a.
+    N - 10 + $a.
 
 %% [
 %%   {
@@ -421,5 +431,3 @@ invalid_incorrect_iv_test() ->
 
 
 -endif.
-
-%% End of Module.
