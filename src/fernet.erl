@@ -108,16 +108,18 @@ encode_token(Token) ->
   binary_to_list(base64url:encode(Token)).
 
 decode_token(EncodedToken) ->
-  base64url:decode(EncodedToken).
+  try
+      base64url:decode(EncodedToken)
+  catch
+      error:{badarg, _Char} -> throw(invalid_base64)
+  end.
 
-validate(Vsn, Opts, TS, TTL, _Hmac, _TermsUsedInHMAC, F) -> 
-    try validate_vsn(Vsn), validate_ttl(Opts, TS, TTL) of
-        ok ->
-            F()
-    catch
-        throw:Reason ->
-            {error, Reason}
-    end.
+validate_msg_size(MsgSize) when MsgSize < 0 ->
+    throw(too_short);
+validate_msg_size(MsgSize) when MsgSize rem ?BLOCKSIZE =/= 0 ->
+    throw(payload_size_not_multiple_of_block_size);
+validate_msg_size(_) ->
+    ok.
 
 validate_vsn(<<128>>) -> ok;
 validate_vsn(_) -> throw(bad_version).
@@ -128,22 +130,62 @@ validate_ttl(Now, TS, TTL) ->
    Diff = Now - TS,
    AbsDiff = abs(Diff),
    if Diff < 0, AbsDiff < ?MAX_SKEW -> ok; % in the past but within skew
-     Diff < 0 -> throw(too_new); % in the past, with way too large of a  skew
-     Diff >= 0, Diff < TTL -> ok; % absolutely okay
-     Diff > 0, Diff > TTL, Diff-TTL < ?MAX_SKEW -> ok; % past the TTL, but within skew
-     Diff > 0, Diff > TTL -> throw(too_old)
+      Diff < 0 -> throw(too_new); % in the past, with way too large of a  skew
+      Diff >= 0, Diff < TTL -> ok; % absolutely okay
+     %Diff > 0, Diff > TTL, Diff-TTL < ?MAX_SKEW -> ok; % past the TTL, but within skew
+      Diff > 0, Diff > TTL -> throw(too_old) % according to spec, skew doesn't apply here
    end.
+
+validate_hmac(Hmac, SigningKey, {TS, IV, CypherText}) ->
+    ReHmac = hmac(SigningKey, payload(TS, IV, CypherText)),
+    case verify_in_constant_time(Hmac,ReHmac) of
+        true -> ok;
+        false -> throw(incorrect_mac)
+    end.
+
+%% @doc Verifies two hashes for matching purpose, in constant time. That allows
+%% a safer verification as no attacker can use the time it takes to compare hash
+%% values to find an attack vector (past figuring out the complexity)
+verify_in_constant_time(X, Y) ->
+    case byte_size(X) == byte_size(Y) of
+        true ->
+            verify_in_constant_time(X, Y, 0);
+        false ->
+            false
+    end.
+
+verify_in_constant_time(<<X,RestX/binary>>, <<Y,RestY/binary>>, Result) ->
+        verify_in_constant_time(RestX, RestY, (X bxor Y) bor Result);
+verify_in_constant_time(<<>>, <<>>, Result) ->
+        Result == 0.
 
 verify_and_decrypt_token(EncodedToken, Key, TTL, Now) ->
   %% TODO: Verify - see Ruby source for rules...
-  DecodedToken = decode_token(EncodedToken),
-  MsgSize = byte_size(DecodedToken)-(1 + ?TSSIZE + ?IVSIZE + ?HMACSIZE),
-  <<Vsn:1/binary, TS:8/binary, IV:16/binary, CypherText:MsgSize/binary,
-    _Hmac:32/binary>> = DecodedToken,
-  validate(Vsn, Now, binary_to_seconds(TS), TTL, _Hmac, ok, fun () ->
-    <<_SigningKey:16/binary, EncryptionKey:16/binary>> = decode_key(Key),
-    {ok, pkcs7:unpad(block_decrypt(EncryptionKey, IV, CypherText))}
-    end).
+  try
+      DecodedToken = decode_token(EncodedToken),
+      MsgSize = byte_size(DecodedToken)-(1 + ?TSSIZE + ?IVSIZE + ?HMACSIZE),
+      validate_msg_size(MsgSize),
+      <<Vsn:1/binary, TS:8/binary, IV:16/binary, CypherText:MsgSize/binary,
+        Hmac:32/binary>> = DecodedToken,
+      <<SigningKey:16/binary, EncryptionKey:16/binary>> = decode_key(Key),
+      validate_vsn(Vsn),
+      validate_ttl(Now, binary_to_seconds(TS), TTL),
+      validate_hmac(Hmac, SigningKey, {TS, IV, CypherText}),
+      Decrypted = block_decrypt(EncryptionKey, IV, CypherText),
+      try
+          {ok, pkcs7:unpad(Decrypted)}
+      catch
+          error:_ -> {error, payload_padding}
+      end
+  catch
+      throw:invalid_base64 = Err -> {error, Err};
+      throw:too_short = Err -> {error, Err};
+      throw:payload_size_not_multiple_of_block_size = Err -> {error, Err};
+      throw:bad_version = Err -> {error, Err};
+      throw:too_old = Err -> {error, Err};
+      throw:too_new = Err -> {error, Err};
+      throw:incorrect_mac = Err -> {error, Err}
+  end.
 
 block_encrypt(Key, IV, Padded) ->
   crypto:block_encrypt(aes_cbc128, Key, IV, Padded).
@@ -171,7 +213,7 @@ binary_to_seconds(<<Bin:64>>) ->
 generate_key_test() ->
   ?assertEqual(32, byte_size(generate_key())).
 
-% generate_key should generate a 16-byte binary
+% generate_iv should generate a 16-byte binary
 generate_iv_test() ->
   ?assertEqual(16, byte_size(generate_iv())).
 
@@ -199,10 +241,12 @@ decode_key_test() ->
 %]
 % 1985-10-26T01:20:00-07:00 == 499162800 Seconds since the epoch
 %
-generate_token_test() ->
+generate_token_test_() ->
   Tok = generate_token("hello", <<0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15>>, 499162800, decode_key("cw_0x689RpI-jtRR7oE8h_eQsKImvJapLeSbXpwF4e4=")),
-  ?assertEqual(decode_token("gAAAAAAdwJ6wAAECAwQFBgcICQoLDA0ODy021cpGVWKZ_eEwCGM4BLLF_5CV9dOPmrhuVUPgJobwOz7JcbmrR64jVmpU4IwqDA=="),
-               decode_token(Tok)).
+  [?_assertEqual("gAAAAAAdwJ6wAAECAwQFBgcICQoLDA0ODy021cpGVWKZ_eEwCGM4BLLF_5CV9dOPmrhuVUPgJobwOz7JcbmrR64jVmpU4IwqDA==",
+                 Tok),
+   ?_assertEqual(decode_token("gAAAAAAdwJ6wAAECAwQFBgcICQoLDA0ODy021cpGVWKZ_eEwCGM4BLLF_5CV9dOPmrhuVUPgJobwOz7JcbmrR64jVmpU4IwqDA=="),
+                 decode_token(Tok))].
 
 generate_hmac_test() ->
   SigningKey = <<115, 15, 244, 199, 175, 61, 70, 146, 62, 142, 212, 81, 238, 129, 60, 135>>,
@@ -259,7 +303,7 @@ verify_and_decrypt_token_test() ->
     Secret = "cw_0x689RpI-jtRR7oE8h_eQsKImvJapLeSbXpwF4e4=",
     Now = 499162800,
     {ok, Message} = verify_and_decrypt_token(Token, Secret, TTL, Now),
-    ?assertEqual("hello", binary_to_list(Message)).
+    ?assertEqual(<<"hello">>, Message).
 
 verify_and_decrypt_token_expired_ttl_test() ->
     Token = "gAAAAAAdwJ6wAAECAwQFBgcICQoLDA0ODy021cpGVWKZ_eEwCGM4BLLF_5CV9dOPmrhuVUPgJobwOz7JcbmrR64jVmpU4IwqDA==",
@@ -288,6 +332,76 @@ verify_and_decrypt_token_invalid_version_test() ->
     Secret = "cw_0x689RpI-jtRR7oE8h_eQsKImvJapLeSbXpwF4e4=",
     Now = 499162800,
     {error, bad_version} = verify_and_decrypt_token(Token, Secret, TTL, Now).
+
+
+%% From https://github.com/fernet/spec/blob/master/invalid.json
+
+invalid_incorrect_mac_test() ->
+    Token = "gAAAAAAdwJ6xAAECAwQFBgcICQoLDA0OD3HkMATM5lFqGaerZ-fWPAl1-szkFVzXTuGb4hR8AKtwcaX1YdykQUFBQUFBQUFBQQ==",
+    Now = 499162800,
+    TTL = 60,
+    Secret = "cw_0x689RpI-jtRR7oE8h_eQsKImvJapLeSbXpwF4e4=",
+    ?assertEqual({error, incorrect_mac},
+                 verify_and_decrypt_token(Token, Secret, TTL, Now)).
+
+invalid_too_short_test() ->
+    Token = "gAAAAAAdwJ6xAAECAwQFBgcICQoLDA0OD3HkMATM5lFqGaerZ-fWPA==",
+    Now = 499162800,
+    TTL = 60,
+    Secret = "cw_0x689RpI-jtRR7oE8h_eQsKImvJapLeSbXpwF4e4=",
+    ?assertEqual({error, too_short},
+                 verify_and_decrypt_token(Token, Secret, TTL, Now)).
+
+invalid_invalid_base64_test() ->
+    Token = "%%%%%%%%%%%%%AECAwQFBgcICQoLDA0OD3HkMATM5lFqGaerZ-fWPAl1-szkFVzXTuGb4hR8AKtwcaX1YdykRtfsH-p1YsUD2Q==",
+    Now = 499162800,
+    TTL = 60,
+    Secret = "cw_0x689RpI-jtRR7oE8h_eQsKImvJapLeSbXpwF4e4=",
+    ?assertEqual({error, invalid_base64},
+                 verify_and_decrypt_token(Token, Secret, TTL, Now)).
+
+invalid_payload_size_to_block_size_test() ->
+    Token = "gAAAAAAdwJ6xAAECAwQFBgcICQoLDA0OD3HkMATM5lFqGaerZ-fWPOm73QeoCk9uGib28Xe5vz6oxq5nmxbx_v7mrfyudzUm",
+    Now = 499162800,
+    TTL = 60,
+    Secret = "cw_0x689RpI-jtRR7oE8h_eQsKImvJapLeSbXpwF4e4=",
+    ?assertEqual({error, payload_size_not_multiple_of_block_size},
+                 verify_and_decrypt_token(Token, Secret, TTL, Now)).
+
+invalid_payload_padding_test() ->
+    Token = "gAAAAAAdwJ6xAAECAwQFBgcICQoLDA0ODz4LEpdELGQAad7aNEHbf-JkLPIpuiYRLQ3RtXatOYREu2FWke6CnJNYIbkuKNqOhw==",
+    Now = 499162800,
+    TTL = 60,
+    Secret = "cw_0x689RpI-jtRR7oE8h_eQsKImvJapLeSbXpwF4e4=",
+    ?assertEqual({error, payload_padding},
+                 verify_and_decrypt_token(Token, Secret, TTL, Now)).
+
+invalid_far_future_skew_test() ->
+    Token = "gAAAAAAdwStRAAECAwQFBgcICQoLDA0OD3HkMATM5lFqGaerZ-fWPAnja1xKYyhd-Y6mSkTOyTGJmw2Xc2a6kBd-iX9b_qXQcw==",
+    Now = 499162800,
+    TTL = 60,
+    Secret = "cw_0x689RpI-jtRR7oE8h_eQsKImvJapLeSbXpwF4e4=",
+    ?assertEqual({error, too_new},
+                 verify_and_decrypt_token(Token, Secret, TTL, Now)).
+
+invalid_expired_ttl_test() ->
+    Token = "gAAAAAAdwJ6xAAECAwQFBgcICQoLDA0OD3HkMATM5lFqGaerZ-fWPAl1-szkFVzXTuGb4hR8AKtwcaX1YdykRtfsH-p1YsUD2Q==",
+    Now = 499162800+90,
+    TTL = 60,
+    Secret = "cw_0x689RpI-jtRR7oE8h_eQsKImvJapLeSbXpwF4e4=",
+    ?assertEqual({error, too_old},
+                 verify_and_decrypt_token(Token, Secret, TTL, Now)).
+
+invalid_incorrect_iv_test() ->
+    %% An invalid IV causes a padding error!
+    Token = "gAAAAAAdwJ6xBQECAwQFBgcICQoLDA0OD3HkMATM5lFqGaerZ-fWPAkLhFLHpGtDBRLRTZeUfWgHSv49TF2AUEZ1TIvcZjK1zQ=",
+    Now = 499162800,
+    TTL = 60,
+    Secret = "cw_0x689RpI-jtRR7oE8h_eQsKImvJapLeSbXpwF4e4=",
+    ?assertEqual({error, payload_padding},
+                 verify_and_decrypt_token(Token, Secret, TTL, Now)).
+
+
 -endif.
 
 %% End of Module.
