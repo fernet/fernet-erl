@@ -67,7 +67,7 @@ decode_key(Key) ->
 %% @doc Generate a token for the provided Message using the supplied Key.
 -spec generate_token(iolist(), key()) -> encoded_token().
 generate_token(Message, Key) ->
-    generate_token(Message, generate_iv(), erlang:system_time(seconds), Key).
+    generate_token(Message, generate_iv(), erlang_system_seconds(), Key).
 
 %% @doc Verify a token and extract the message 
 -spec verify_and_decrypt_token(encoded_token(), key(), TTL::integer() | infinity) ->
@@ -75,7 +75,7 @@ generate_token(Message, Key) ->
 verify_and_decrypt_token(Token, Key, infinity) ->
     verify_and_decrypt_token(Token, Key, infinity, undefined);
 verify_and_decrypt_token(Token, Key, TTL) ->
-    verify_and_decrypt_token(Token, Key, TTL, erlang:system_time(seconds)).
+    verify_and_decrypt_token(Token, Key, TTL, erlang_system_seconds()).
 
 %%%===================================================================
 %%% Private
@@ -197,11 +197,30 @@ seconds_to_binary(Seconds) ->
 binary_to_seconds(<<Bin:64>>) ->
   Bin.
 
+-spec erlang_system_seconds() -> integer().
+erlang_system_seconds() ->
+    try
+        erlang:system_time(seconds)
+    catch
+        error:undef -> % Pre 18.0
+            timestamp_to_seconds(os:timestamp())
+    end.
+
+-spec timestamp_to_seconds(erlang:timestamp()) -> integer().
+timestamp_to_seconds({MegaSecs, Secs, MicroSecs}) ->
+    round(((MegaSecs*1000000 + Secs)*1000000 + MicroSecs) / 1000000).
+
+
 %%%===================================================================
 %%% Tests
 %%%===================================================================
 -ifdef(TEST).
 -include_lib("eunit/include/eunit.hrl").
+
+% timestamp_to_seconds should return the number of seconds since the Unixtime
+% Epoch represented by a tuple {MegaSecs, Secs, MicroSecs} as returned by now()
+timestamp_to_seconds_test() ->
+    ?assertEqual(1412525041, timestamp_to_seconds({1412,525041,377060})).
 
 % generate_key should generate a 32-byte binary
 generate_key_test() ->
