@@ -12,7 +12,8 @@
 %%%-------------------------------------------------------------------
 -module(fernet).
 
--export([generate_key/0, encode_key/1, decode_key/1,
+-export([generate_key/0, generate_encoded_key/0,
+         encode_key/1, encode_key/2, decode_key/1,
          generate_token/2, verify_and_decrypt_token/3]).
 
 -define(VERSION, 128).
@@ -23,76 +24,67 @@
 -define(MAX_SKEW, 60).
 -define(PAYOFFSET, 9 + ?BLOCKSIZE).
 
--type key() :: binary().
--type encoded_key() :: string().
--type encoded_token() :: string().
--export_type([encoded_key/0, encoded_token/0]).
+-type key() :: <<_:256>>.
+-type signing_key() :: <<_:128>>.
+-type encryption_key() :: <<_:128>>.
+-type encoded_key() :: binary().
+-type encoded_token() :: binary().
+-export_type([key/0, signing_key/0, encryption_key/0,
+              encoded_key/0, encoded_token/0]).
 
 %%%===================================================================
 %%% API
 %%%===================================================================
 
-%%--------------------------------------------------------------------
-%% @doc
-%% Generate a pseudorandom 32byte key.
-%%
-%% @end
-%%--------------------------------------------------------------------
+%% @doc Generate a pseudorandom 32 bytes key.
 -spec generate_key() -> key().
 generate_key() ->
-  crypto:strong_rand_bytes(32).
+    crypto:strong_rand_bytes(32).
 
-%%--------------------------------------------------------------------
-%% @doc
-%% Encode a key using base64url encoding format.
-%%
-%% @end
-%%--------------------------------------------------------------------
+%% @doc Generate a pseudorandom 32 bytes key, and encode it with the
+%% proper base64url format for interoperability.
+-spec generate_encoded_key() -> key().
+generate_encoded_key() ->
+    base64url:encode_mime(crypto:strong_rand_bytes(32)).
+
+%% @doc Encode a key using base64url encoding format for interoperability
 -spec encode_key(key()) -> encoded_key().
-encode_key(Key) ->
-  binary_to_list(base64url:encode_mime(Key)).
+encode_key(<<Key:32/binary>>) ->
+    base64url:encode_mime(Key).
 
-%%--------------------------------------------------------------------
-%% @doc
-%% Decode a base64url encoded key.
-%%
-%% @end
-%%--------------------------------------------------------------------
+%% @doc Encode a signing key and an encryption key using base64url
+%% encoding format for interoperability
+-spec encode_key(signing_key(), encryption_key()) -> encoded_key().
+encode_key(<<SigningKey:16/binary>>, <<EncryptionKey:16/binary>>) ->
+    Key = <<SigningKey/binary, EncryptionKey/binary>>,
+    base64url:encode_mime(Key).
+
+%% @doc Decode a base64url encoded key.
 -spec decode_key(encoded_key()) -> key().
 decode_key(Key) ->
-  base64url:decode(Key).
+    base64url:decode(Key).
 
-%%--------------------------------------------------------------------
-%% @doc
-%% Generate a token for the provided Message using the supplied Key.
-%%
-%% @end
-%%--------------------------------------------------------------------
+%% @doc Generate a token for the provided Message using the supplied Key.
 -spec generate_token(iolist(), key()) -> encoded_token().
 generate_token(Message, Key) ->
-  generate_token(Message, generate_iv(), erlang:system_time(seconds), Key).
+    generate_token(Message, generate_iv(), erlang:system_time(seconds), Key).
 
-%%--------------------------------------------------------------------
-%% @doc
-%% Verify a token and extract the message 
-%%
-%% @end
-%%--------------------------------------------------------------------
+%% @doc Verify a token and extract the message 
 -spec verify_and_decrypt_token(encoded_token(), key(), TTL::integer() | infinity) ->
-  {ok, iodata()}.
+    {ok, iodata()}.
 verify_and_decrypt_token(Token, Key, infinity) ->
     verify_and_decrypt_token(Token, Key, infinity, undefined);
 verify_and_decrypt_token(Token, Key, TTL) ->
     verify_and_decrypt_token(Token, Key, TTL, erlang:system_time(seconds)).
 
-%%%%%%%%%%%%%%%
-%%% Private %%%
-%%%%%%%%%%%%%%%
+%%%===================================================================
+%%% Private
+%%%===================================================================
 
 generate_token(Message, IV, Seconds, Key) ->
   EncodedSeconds = seconds_to_binary(Seconds),
   Padded = pkcs7:pad(iolist_to_binary(Message)),
-  <<SigningKey:16/binary, EncryptionKey:16/binary>> = Key,
+  <<SigningKey:16/binary, EncryptionKey:16/binary>> = base64url:decode(Key),
   CypherText = block_encrypt(EncryptionKey, IV, Padded),
   Payload = payload(EncodedSeconds, IV, CypherText),
   Hmac = hmac(SigningKey, Payload),
@@ -105,7 +97,7 @@ hmac(Key, Payload) ->
     crypto:hmac(sha256, Key, Payload).
 
 encode_token(Token) ->
-  binary_to_list(base64url:encode_mime(Token)).
+    base64url:encode_mime(Token).
 
 decode_token(EncodedToken) ->
   try
@@ -193,7 +185,7 @@ block_encrypt(Key, IV, Padded) ->
 block_decrypt(Key, IV, Cypher) ->
   crypto:block_decrypt(aes_cbc128, Key, IV, Cypher).
 
--spec generate_iv() -> binary().
+-spec generate_iv() -> <<_:128>>.
 generate_iv() ->
   crypto:strong_rand_bytes(16).
 
@@ -205,13 +197,19 @@ seconds_to_binary(Seconds) ->
 binary_to_seconds(<<Bin:64>>) ->
   Bin.
 
-%% Tests
+%%%===================================================================
+%%% Tests
+%%%===================================================================
 -ifdef(TEST).
 -include_lib("eunit/include/eunit.hrl").
 
 % generate_key should generate a 32-byte binary
 generate_key_test() ->
   ?assertEqual(32, byte_size(generate_key())).
+
+% generate_key should generate a 32-byte binary
+generate_encoded_key_test() ->
+    ?assertEqual(32, byte_size(decode_key(generate_encoded_key()))).
 
 % generate_iv should generate a 16-byte binary
 generate_iv_test() ->
@@ -222,7 +220,7 @@ encode_key_test() ->
           62, 142, 212, 81, 238, 129, 60, 135, 247,
           144, 176, 162, 38, 188, 150, 169, 45,
           228, 155, 94, 156, 5, 225, 238>>,
-  ?assertEqual("cw_0x689RpI-jtRR7oE8h_eQsKImvJapLeSbXpwF4e4=", encode_key(Key)).
+  ?assertEqual(<<"cw_0x689RpI-jtRR7oE8h_eQsKImvJapLeSbXpwF4e4=">>, encode_key(Key)).
 
 decode_key_test() ->
   Key = "cw_0x689RpI-jtRR7oE8h_eQsKImvJapLeSbXpwF4e4=",
@@ -243,8 +241,8 @@ decode_key_test() ->
 % 1985-10-26T01:20:00-07:00 == 499162800 Seconds since the epoch
 %
 generate_token_test_() ->
-  Tok = generate_token("hello", <<0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15>>, 499162800, decode_key("cw_0x689RpI-jtRR7oE8h_eQsKImvJapLeSbXpwF4e4=")),
-  [?_assertEqual("gAAAAAAdwJ6wAAECAwQFBgcICQoLDA0ODy021cpGVWKZ_eEwCGM4BLLF_5CV9dOPmrhuVUPgJobwOz7JcbmrR64jVmpU4IwqDA==",
+  Tok = generate_token("hello", <<0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15>>, 499162800, "cw_0x689RpI-jtRR7oE8h_eQsKImvJapLeSbXpwF4e4="),
+  [?_assertEqual(<<"gAAAAAAdwJ6wAAECAwQFBgcICQoLDA0ODy021cpGVWKZ_eEwCGM4BLLF_5CV9dOPmrhuVUPgJobwOz7JcbmrR64jVmpU4IwqDA==">>,
                  Tok),
    ?_assertEqual(decode_token("gAAAAAAdwJ6wAAECAwQFBgcICQoLDA0ODy021cpGVWKZ_eEwCGM4BLLF_5CV9dOPmrhuVUPgJobwOz7JcbmrR64jVmpU4IwqDA=="),
                  decode_token(Tok))].
