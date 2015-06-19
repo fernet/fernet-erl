@@ -9,9 +9,19 @@ specification) which
 
 ## Interface ##
 
-    1> Key = fernet:generate_key().
-    <<183,88,242,112,75,57,77,51,186,199,75,192,143,226,186,
-    238,248,154,13,66,136,151,200,66,53,179,25,124,205,...>>
-    
-    2> fernet:generate_token("hello", Key).
-    "gAAAAABUePOv15TqGfU53xE8Ve2oK9okoFzRGZB-bzyqZg1kRaclkXPzz6x15I-yHoT1vnhPCd6pdkskwqc5wyDF-wjVMdpauw"
+```erlang
+1> Key = fernet:generate_encoded_key().
+<<"iXOktbuC7QYXM9aF_m49VAqdkZ6jQBMsqjYwEHTm5ps=">>
+
+2> Token = fernet:generate_token("hello", Key).
+<<"gAAAAABVguk6wOivag6ZN_76fP2EXltZGJ9yPLLXKg4aBR9ekbhVnYmkJOuqTGl_GlmNlg6Z_KDl2wb1duRV41CNbF931n4LgA==">>
+
+3> fernet:verify_and_decrypt_token(Token, Key, infinity).
+{ok,<<"hello">>}
+
+4> TTL = 10. % seconds
+10
+
+5> fernet:verify_and_decrypt_token(Token, Key, TTL).
+{error, too_old}
+```
