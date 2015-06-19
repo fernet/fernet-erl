@@ -1,6 +1,6 @@
 # fernet for Erlang#
 
-This is an Erlang implementation of the [Fernet specificiation](https://github.com/fernet/spec) which
+This is an Erlang implementation of the [Fernet specification](https://github.com/fernet/spec) which
 
  > "takes a user-provided message (an arbitrary sequence of
  > bytes), a key (256 bits), and the current time, and produces a token, which
