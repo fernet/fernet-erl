@@ -16,6 +16,11 @@
          encode_key/1, encode_key/2, decode_key/1,
          generate_token/2, verify_and_decrypt_token/3]).
 
+-ifdef(TEST).
+-export([verify_and_decrypt_token/4
+        ,generate_token/4]).
+-endif.
+
 -define(VERSION, 128).
 -define(BLOCKSIZE, 16).
 -define(HMACSIZE, 32).
