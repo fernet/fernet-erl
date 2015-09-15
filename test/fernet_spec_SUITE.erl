@@ -16,20 +16,6 @@ all() ->
 %% Setup and teardown
 %%====================================================================
 
-init_per_suite(Config) ->
-    Config.
-
-end_per_suite(Config) ->
-    Config.
-
-%% Runs before the test case.  Runs in the same process.
-init_per_testcase(_CaseName, Config) ->
-    Config.
-
-%% Runs after the test case.  Runs in the same process.
-end_per_testcase(_CaseName, Config) ->
-    Config.
-
 read_fixture_file(Config, Filename) ->
     DataDir  = ?config(data_dir, Config),
     file:read_file(filename:join(DataDir, Filename)).
