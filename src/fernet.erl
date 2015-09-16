@@ -69,7 +69,7 @@ decode_key(Key) ->
     base64url:decode(Key).
 
 %% @doc Generate a token for the provided Message using the supplied Key.
--spec generate_token(iolist(), key()) -> encoded_token().
+-spec generate_token(iodata(), key()) -> encoded_token().
 generate_token(Message, Key) ->
     generate_token(Message, generate_iv(), erlang_system_seconds(), Key).
 
