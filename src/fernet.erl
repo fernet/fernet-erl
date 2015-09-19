@@ -47,7 +47,7 @@ generate_key() ->
 
 %% @doc Generate a pseudorandom 32 bytes key, and encode it with the
 %% proper base64url format for interoperability.
--spec generate_encoded_key() -> key().
+-spec generate_encoded_key() -> encoded_key().
 generate_encoded_key() ->
     base64url:encode_mime(crypto:strong_rand_bytes(32)).
 
