@@ -4,5 +4,7 @@
   {vsn, git},
   {modules, [fernet]},
   {registered, []},
+  {licenses, ["MIT"]},
   {applications, [kernel, stdlib, base64url, pkcs7]},
-  {env, []}]}.
+  {env, []},
+  {links, [{"GitHub", "https://github.com/fernet/fernet-erl"}]}]}.
