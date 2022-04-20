@@ -1,8 +1,11 @@
-[{<<"pkcs7">>,
-  {git,"https://github.com/camshaft/pkcs7.erl.git",
-       {ref,"56b11a13f6743b5610adab934389972fc530a7a1"}},
-  0},
- {<<"base64url">>,
-  {git,"https://github.com/dvv/base64url.git",
-       {ref,"9d0fe71ef6dfd2bf623e64ad495098c9eabbf0ef"}},
-  0}].
+{"1.2.0",
+[{<<"base64url">>,{pkg,<<"base64url">>,<<"1.0.1">>},0},
+ {<<"pkcs7">>,{pkg,<<"pkcs7">>,<<"1.0.2">>},0}]}.
+[
+{pkg_hash,[
+ {<<"base64url">>, <<"F8C7F2DA04CA9A5D0F5F50258F055E1D699F0E8BF4CFDB30B750865368403CF6">>},
+ {<<"pkcs7">>, <<"CD9D50177BFBD3FD80E8BC79D2941D3B2968B64BD1151EF3E54D8C4B2605ED7E">>}]},
+{pkg_hash_ext,[
+ {<<"base64url">>, <<"F9B3ADD4731A02A9B0410398B475B33E7566A695365237A6BDEE1BB447719F5C">>},
+ {<<"pkcs7">>, <<"0E4FAA65411E204B7952712D58F657335109ECBB24CF79163DC96458BA8D6518">>}]}
+].
