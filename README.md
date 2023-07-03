@@ -1,7 +1,5 @@
 # fernet for Erlang #
 
-[![Build Status](https://travis-ci.org/bigkevmcd/erlfernet.svg?branch=master)](https://travis-ci.org/bigkevmcd/erlfernet)
-
 This is an Erlang implementation of the [Fernet specification](https://github.com/fernet/spec) which
 
  > "takes a user-provided message (an arbitrary sequence of
